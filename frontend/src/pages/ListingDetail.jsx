@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate, useLocation } from 'react-router-dom';
 import {
   Clock,
   ShieldCheck,
@@ -15,21 +15,26 @@ import {
   Share2,
   Calendar,
   Zap,
-  Radio
+  LogIn,
 } from 'lucide-react';
 import { getListingById, placeBid, askQuestion } from '../services/api';
-import { sampleListings } from '../data/mockData';
 import { socket } from '../services/socket';
+import { useAuth } from '../context/AuthContext';
+import { formatPhotoUrl } from '../utils/imageHelper';
 
 export default function ListingDetail() {
   const { id } = useParams();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { user, isAuthenticated } = useAuth();
+
   const [listing, setListing] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [selectedPhotoIndex, setSelectedPhotoIndex] = useState(0);
 
   // Bidding form states
   const [bidAmount, setBidAmount] = useState('');
-  const [bidderName, setBidderName] = useState('');
   const [bidStatus, setBidStatus] = useState({ type: null, message: '' });
   const [submittingBid, setSubmittingBid] = useState(false);
 
@@ -49,19 +54,17 @@ export default function ListingDetail() {
   useEffect(() => {
     const fetchDetail = async () => {
       setLoading(true);
+      setError(null);
       try {
         const data = await getListingById(id);
-        if (data) {
+        if (data && data._id) {
           setListing(data);
         } else {
-          // fallback to mock
-          const mock = sampleListings.find((item) => item._id === id) || sampleListings[0];
-          setListing(mock);
+          setError('Listing not found in database.');
         }
       } catch (err) {
-        console.warn('Using local fallback for listing:', err.message);
-        const mock = sampleListings.find((item) => item._id === id) || sampleListings[0];
-        setListing(mock);
+        console.error('Error fetching listing details:', err);
+        setError('Listing not found or unable to load details from database.');
       } finally {
         setLoading(false);
       }
@@ -78,7 +81,6 @@ export default function ListingDetail() {
       socket.connect();
     }
 
-    // Join this specific listing room
     socket.emit('joinListing', id);
 
     const onConnect = () => setSocketConnected(true);
@@ -87,7 +89,6 @@ export default function ListingDetail() {
     socket.on('connect', onConnect);
     socket.on('disconnect', onDisconnect);
 
-    // Listen for live bid updates emitted by backend
     const handleBidUpdate = (data) => {
       console.log('⚡ [Socket] Received bidUpdate:', data);
       if (data.listingId === id) {
@@ -104,7 +105,6 @@ export default function ListingDetail() {
           };
         });
 
-        // Flash live banner
         const bidder = data.bid?.bidderId?.name || 'A bidder';
         setLiveNotification(`⚡ Live: ${bidder} placed a new highest bid of ₹${data.currentBid}!`);
         setTimeout(() => setLiveNotification(''), 4500);
@@ -149,15 +149,32 @@ export default function ListingDetail() {
   const minIncrement = listing?.minIncrement || 10;
   const minRequiredBid = currentBid + minIncrement;
 
-  // Set default bid amount when listing loads or currentBid updates
   useEffect(() => {
     if (listing) {
       setBidAmount(minRequiredBid.toString());
     }
   }, [listing?.currentBid, minRequiredBid]);
 
+  const sellerId = (listing?.sellerId?._id || listing?.sellerId || '').toString();
+  const currentUserId = (user?._id || '').toString();
+  const isSeller = Boolean(currentUserId && sellerId && currentUserId === sellerId);
+
   const handlePlaceBid = async (e) => {
     e.preventDefault();
+
+    if (!isAuthenticated) {
+      navigate('/login', { state: { from: location } });
+      return;
+    }
+
+    if (isSeller) {
+      setBidStatus({
+        type: 'error',
+        message: 'Sellers cannot place bids on their own items.',
+      });
+      return;
+    }
+
     const numAmount = parseFloat(bidAmount);
 
     if (isNaN(numAmount) || numAmount < minRequiredBid) {
@@ -173,17 +190,16 @@ export default function ListingDetail() {
 
     try {
       const response = await placeBid(listing._id, {
-        bidderId: 'user_anonymous',
-        bidderName: bidderName || 'Campus Bidder',
+        bidderId: user._id,
+        bidderName: user.name,
         amount: numAmount,
       });
 
-      // Update state locally
       const newBidEntry = response.bid || {
         _id: 'bid-' + Date.now(),
         amount: numAmount,
         createdAt: new Date().toISOString(),
-        bidderId: { name: bidderName || 'Campus Bidder' },
+        bidderId: { name: user.name, email: user.email },
       };
 
       setListing((prev) => ({
@@ -198,26 +214,10 @@ export default function ListingDetail() {
       });
       setBidAmount((numAmount + minIncrement).toString());
     } catch (err) {
-      console.warn('Bid request error or demo mode:', err.message);
-      // Fallback local optimistic update for demo
-      const newBidEntry = {
-        _id: 'bid-' + Date.now(),
-        amount: numAmount,
-        createdAt: new Date().toISOString(),
-        bidderId: { name: bidderName || 'Campus Bidder' },
-      };
-
-      setListing((prev) => ({
-        ...prev,
-        currentBid: numAmount,
-        bids: [newBidEntry, ...(prev.bids || [])],
-      }));
-
       setBidStatus({
-        type: 'success',
-        message: `Bid of ₹${numAmount} recorded locally!`,
+        type: 'error',
+        message: err.response?.data?.error || err.message || 'Failed to place bid',
       });
-      setBidAmount((numAmount + minIncrement).toString());
     } finally {
       setSubmittingBid(false);
     }
@@ -227,16 +227,22 @@ export default function ListingDetail() {
     e.preventDefault();
     if (!newQuestion.trim()) return;
 
+    if (!isAuthenticated) {
+      navigate('/login', { state: { from: location } });
+      return;
+    }
+
     setSubmittingQuestion(true);
     setQuestionStatus({ type: null, message: '' });
 
     try {
-      await askQuestion(listing._id, {
-        userId: 'student_user',
+      const res = await askQuestion(listing._id, {
+        userId: user._id,
+        userName: user.name,
         question: newQuestion,
       });
 
-      const newQ = {
+      const newQ = res.question || {
         _id: 'q-' + Date.now(),
         question: newQuestion,
         answer: '',
@@ -253,23 +259,10 @@ export default function ListingDetail() {
       });
       setNewQuestion('');
     } catch (err) {
-      // Fallback local update
-      const newQ = {
-        _id: 'q-' + Date.now(),
-        question: newQuestion,
-        answer: 'Seller notified. Awaiting reply.',
-      };
-
-      setListing((prev) => ({
-        ...prev,
-        questions: [...(prev.questions || []), newQ],
-      }));
-
       setQuestionStatus({
-        type: 'success',
-        message: 'Question added to the listing Q&A.',
+        type: 'error',
+        message: err.response?.data?.error || err.message || 'Failed to submit question.',
       });
-      setNewQuestion('');
     } finally {
       setSubmittingQuestion(false);
     }
@@ -278,25 +271,28 @@ export default function ListingDetail() {
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-50">
-        <p className="text-gray-500 text-sm">Loading listing details...</p>
+        <p className="text-gray-500 text-sm font-medium">Loading live listing details from database...</p>
       </div>
     );
   }
 
-  if (!listing) {
+  if (error || !listing) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50">
-        <p className="text-lg font-bold text-gray-700">Listing not found</p>
-        <Link to="/" className="mt-3 text-indigo-600 font-semibold text-sm hover:underline">
+      <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 px-4 text-center">
+        <p className="text-xl font-bold text-gray-800">{error || 'Listing not found in database.'}</p>
+        <p className="text-xs text-gray-500 mt-2">The requested auction might have ended or been removed.</p>
+        <Link
+          to="/"
+          className="mt-5 px-5 py-2.5 rounded-xl bg-indigo-600 text-white font-bold text-xs hover:bg-indigo-700"
+        >
           Return to Marketplace
         </Link>
       </div>
     );
   }
 
-  const photos = listing.photos && listing.photos.length > 0 ? listing.photos : [
-    'https://images.unsplash.com/photo-1526170375885-4d8ecf77b99f?auto=format&fit=crop&w=800&q=80'
-  ];
+  const rawPhotos = listing.photos && listing.photos.length > 0 ? listing.photos : [''];
+  const formattedPhotos = rawPhotos.map((p) => formatPhotoUrl(p));
 
   return (
     <div className="min-h-screen bg-slate-50 py-8 px-4 sm:px-6 lg:px-8">
@@ -334,7 +330,7 @@ export default function ListingDetail() {
             <div className="bg-white rounded-3xl p-4 border border-gray-200 shadow-sm overflow-hidden">
               <div className="relative aspect-[4/3] rounded-2xl overflow-hidden bg-gray-100">
                 <img
-                  src={photos[selectedPhotoIndex] || photos[0]}
+                  src={formattedPhotos[selectedPhotoIndex] || formattedPhotos[0]}
                   alt={listing.title}
                   className="w-full h-full object-cover"
                 />
@@ -344,9 +340,9 @@ export default function ListingDetail() {
               </div>
 
               {/* Thumbnails */}
-              {photos.length > 1 && (
+              {formattedPhotos.length > 1 && (
                 <div className="flex gap-3 mt-4 overflow-x-auto pb-1">
-                  {photos.map((photo, index) => (
+                  {formattedPhotos.map((photo, index) => (
                     <button
                       key={index}
                       onClick={() => setSelectedPhotoIndex(index)}
@@ -425,7 +421,11 @@ export default function ListingDetail() {
                   </button>
                 </div>
                 {questionStatus.message && (
-                  <p className="text-xs text-emerald-600 mt-2 font-medium">
+                  <p
+                    className={`text-xs mt-2 font-medium ${
+                      questionStatus.type === 'error' ? 'text-red-600' : 'text-emerald-600'
+                    }`}
+                  >
                     {questionStatus.message}
                   </p>
                 )}
@@ -518,69 +518,93 @@ export default function ListingDetail() {
                 </div>
               </div>
 
-              {/* Bid Form */}
-              <form onSubmit={handlePlaceBid} className="mt-6 space-y-4">
-                <div>
-                  <label className="block text-xs font-bold text-gray-700 uppercase tracking-wide mb-1.5">
-                    Your Bidder Name / Handle
-                  </label>
-                  <input
-                    type="text"
-                    value={bidderName}
-                    onChange={(e) => setBidderName(e.target.value)}
-                    placeholder="e.g. Aryan (CS 3rd Year)"
-                    className="w-full px-4 py-2.5 text-sm bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-gray-700 uppercase tracking-wide mb-1.5">
-                    Bid Amount (₹)
-                  </label>
-                  <div className="relative">
-                    <span className="absolute left-4 top-3 text-sm font-bold text-gray-400">₹</span>
-                    <input
-                      type="number"
-                      value={bidAmount}
-                      onChange={(e) => setBidAmount(e.target.value)}
-                      min={minRequiredBid}
-                      step={minIncrement}
-                      required
-                      disabled={isExpired}
-                      className="w-full pl-8 pr-4 py-3 text-lg font-bold text-gray-900 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    />
+              {/* Seller Notification Box or Buyer Bid Form */}
+              {isSeller ? (
+                <div className="mt-6 p-5 rounded-2xl bg-amber-50/90 border border-amber-200 text-amber-900 shadow-sm animate-fadeIn">
+                  <div className="flex items-start gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-amber-100 border border-amber-200 flex items-center justify-center text-amber-700 shrink-0">
+                      <ShieldCheck className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-bold text-amber-950">Your Product Listing</h4>
+                      <p className="text-xs text-amber-900 mt-1 leading-relaxed">
+                        This is your listing. You cannot bid on your own item.
+                      </p>
+                      <p className="text-[11px] text-amber-700 mt-2 font-medium">
+                        Student bids from across campus will appear in the Live Bid History below in real-time.
+                      </p>
+                    </div>
                   </div>
-                  <p className="text-[11px] text-gray-400 mt-1">
-                    Minimum allowed bid is ₹{minRequiredBid} (+₹{minIncrement} increment).
-                  </p>
                 </div>
+              ) : (
+                <form onSubmit={handlePlaceBid} className="mt-6 space-y-4">
+                  {isAuthenticated ? (
+                    <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between text-xs">
+                      <span className="text-gray-500 font-medium">Bidding as:</span>
+                      <span className="font-bold text-indigo-700">{user.name}</span>
+                    </div>
+                  ) : (
+                    <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-800 flex items-center gap-2">
+                      <LogIn className="w-4 h-4 shrink-0" />
+                      <span>Please sign in to place a verified bid.</span>
+                    </div>
+                  )}
 
-                {bidStatus.message && (
-                  <div
-                    className={`p-3 rounded-xl text-xs font-medium flex items-center gap-2 ${
-                      bidStatus.type === 'error'
-                        ? 'bg-red-50 text-red-700 border border-red-200'
-                        : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                    }`}
+                  <div>
+                    <label className="block text-xs font-bold text-gray-700 uppercase tracking-wide mb-1.5">
+                      Bid Amount (₹)
+                    </label>
+                    <div className="relative">
+                      <span className="absolute left-4 top-3 text-sm font-bold text-gray-400">₹</span>
+                      <input
+                        type="number"
+                        value={bidAmount}
+                        onChange={(e) => setBidAmount(e.target.value)}
+                        min={minRequiredBid}
+                        step={minIncrement}
+                        required
+                        disabled={isExpired}
+                        className="w-full pl-8 pr-4 py-3 text-lg font-bold text-gray-900 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                    </div>
+                    <p className="text-[11px] text-gray-400 mt-1">
+                      Minimum allowed bid is ₹{minRequiredBid} (+₹{minIncrement} increment).
+                    </p>
+                  </div>
+
+                  {bidStatus.message && (
+                    <div
+                      className={`p-3 rounded-xl text-xs font-medium flex items-center gap-2 ${
+                        bidStatus.type === 'error'
+                          ? 'bg-red-50 text-red-700 border border-red-200'
+                          : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                      }`}
+                    >
+                      {bidStatus.type === 'error' ? (
+                        <AlertCircle className="w-4 h-4 shrink-0" />
+                      ) : (
+                        <CheckCircle className="w-4 h-4 shrink-0" />
+                      )}
+                      <span>{bidStatus.message}</span>
+                    </div>
+                  )}
+
+                  <button
+                    type="submit"
+                    disabled={submittingBid || isExpired}
+                    className="w-full py-3.5 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 text-white font-bold text-sm shadow-md shadow-indigo-200 disabled:opacity-50 transition-all active:scale-[0.99] flex items-center justify-center gap-2"
                   >
-                    {bidStatus.type === 'error' ? (
-                      <AlertCircle className="w-4 h-4 shrink-0" />
-                    ) : (
-                      <CheckCircle className="w-4 h-4 shrink-0" />
-                    )}
-                    <span>{bidStatus.message}</span>
-                  </div>
-                )}
-
-                <button
-                  type="submit"
-                  disabled={submittingBid || isExpired}
-                  className="w-full py-3.5 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 text-white font-bold text-sm shadow-md shadow-indigo-200 disabled:opacity-50 transition-all active:scale-[0.99] flex items-center justify-center gap-2"
-                >
-                  <Gavel className="w-4 h-4" />
-                  <span>{isExpired ? 'Auction Ended' : 'Place Live Bid'}</span>
-                </button>
-              </form>
+                    <Gavel className="w-4 h-4" />
+                    <span>
+                      {isExpired
+                        ? 'Auction Ended'
+                        : !isAuthenticated
+                        ? 'Sign In to Bid'
+                        : 'Place Live Bid'}
+                    </span>
+                  </button>
+                </form>
+              )}
 
               {/* Public Bid History */}
               <div className="mt-8 pt-6 border-t border-gray-100">

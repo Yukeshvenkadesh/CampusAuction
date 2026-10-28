@@ -1,5 +1,6 @@
 const express = require('express');
 const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
 const router = express.Router();
 
 const User = require('../models/User');
@@ -34,14 +35,21 @@ async function resolveUser(userId, fallbackRole = 'buyer', fallbackName = 'Campu
  */
 router.get('/listings', async (req, res) => {
   try {
-    const { keyword, search, category, condition, status, sort } = req.query;
+    const { keyword, search, category, condition, status, sort, sellerId } = req.query;
 
     const query = {};
 
-    // Filter by status (default active unless requested otherwise)
+    // Filter by sellerId if provided
+    if (sellerId) {
+      if (mongoose.Types.ObjectId.isValid(sellerId)) {
+        query.sellerId = sellerId;
+      }
+    }
+
+    // Filter by status (default active unless requested otherwise or viewing specific seller)
     if (status && status !== 'all') {
       query.status = status;
-    } else if (!status) {
+    } else if (!status && !sellerId) {
       query.status = 'active';
     }
 
@@ -229,6 +237,12 @@ const handlePlaceBid = async (req, res) => {
     // Resolve bidder to valid ObjectId
     const resolvedBidderId = await resolveUser(bidderId, 'buyer', bidderName || 'Campus Bidder');
 
+    // Prevent sellers from bidding on their own listings
+    const sellerIdStr = (listing.sellerId?._id || listing.sellerId).toString();
+    if (sellerIdStr === resolvedBidderId.toString()) {
+      return res.status(400).json({ error: 'Sellers cannot place bids on their own items.' });
+    }
+
     // 3. Save new Bid
     const newBid = new Bid({
       listingId: listing._id,
@@ -359,6 +373,142 @@ router.get('/listings/:id/bids', async (req, res) => {
     res.json(bids);
   } catch (err) {
     res.status(500).json({ error: 'Failed to get bids', details: err.message });
+  }
+});
+
+/**
+ * 1. POST /api/users/register & /api/auth/register
+ * Explicit registration route with bcrypt password hashing
+ */
+router.post(['/users/register', '/auth/register'], async (req, res) => {
+  try {
+    const { name, email, password, role } = req.body;
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: 'Name is required.' });
+    }
+    if (!email || !email.trim()) {
+      return res.status(400).json({ error: 'Email is required.' });
+    }
+    if (!password || password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters long.' });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+
+    // Check if user already exists
+    const existingUser = await User.findOne({ email: normalizedEmail });
+    if (existingUser) {
+      return res.status(400).json({ error: 'An account with this email already exists. Please log in.' });
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const newUser = new User({
+      name: name.trim(),
+      email: normalizedEmail,
+      password: hashedPassword,
+      role: role === 'seller' ? 'seller' : 'buyer',
+    });
+
+    const savedUser = await newUser.save();
+    const userObj = savedUser.toObject();
+    delete userObj.password;
+
+    res.status(201).json(userObj);
+  } catch (err) {
+    console.error('Error registering user:', err);
+    res.status(500).json({ error: 'Registration failed', details: err.message });
+  }
+});
+
+/**
+ * 2. POST /api/users/login & /api/auth/login
+ * Explicit login route with bcrypt password verification
+ */
+router.post(['/users/login', '/auth/login'], async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !email.trim()) {
+      return res.status(400).json({ error: 'Email is required.' });
+    }
+    if (!password) {
+      return res.status(400).json({ error: 'Password is required.' });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid email or password.' });
+    }
+
+    // If user has a hashed password stored, verify with bcrypt
+    if (user.password) {
+      const isMatch = await bcrypt.compare(password, user.password);
+      if (!isMatch) {
+        return res.status(401).json({ error: 'Invalid email or password.' });
+      }
+    } else {
+      // Legacy user without password: set and hash the password for future logins
+      user.password = await bcrypt.hash(password, 10);
+      await user.save();
+    }
+
+    const userObj = user.toObject();
+    delete userObj.password;
+
+    res.json(userObj);
+  } catch (err) {
+    console.error('Error logging in user:', err);
+    res.status(500).json({ error: 'Authentication failed', details: err.message });
+  }
+});
+
+/**
+ * GET /api/users/:userId/listings
+ * Fetch all listings created by a specific user
+ */
+router.get('/users/:userId/listings', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({ error: 'Invalid user ID format' });
+    }
+
+    const listings = await Listing.find({ sellerId: userId }).sort({ createdAt: -1 });
+    res.json(listings);
+  } catch (err) {
+    console.error('Error fetching user listings:', err);
+    res.status(500).json({ error: 'Failed to fetch user listings', details: err.message });
+  }
+});
+
+/**
+ * GET /api/users/:userId/bids
+ * Fetch all bids placed by a specific user with populated listing information
+ */
+router.get('/users/:userId/bids', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({ error: 'Invalid user ID format' });
+    }
+
+    const bids = await Bid.find({ bidderId: userId })
+      .populate({
+        path: 'listingId',
+        select: 'title category currentBid startingPrice status closingTime photos minIncrement',
+        populate: { path: 'sellerId', select: 'name email' },
+      })
+      .sort({ createdAt: -1 });
+
+    res.json(bids);
+  } catch (err) {
+    console.error('Error fetching user bids:', err);
+    res.status(500).json({ error: 'Failed to fetch user bids', details: err.message });
   }
 });
 

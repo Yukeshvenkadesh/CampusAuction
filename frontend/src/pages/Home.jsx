@@ -1,17 +1,25 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Search, SlidersHorizontal, ArrowUpDown, Sparkles, AlertCircle, RefreshCw } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import {
+  Search,
+  SlidersHorizontal,
+  ArrowUpDown,
+  Sparkles,
+  PlusCircle,
+  RefreshCw,
+  ShoppingBag,
+} from 'lucide-react';
 import ListingCard from '../components/ListingCard';
 import { getListings } from '../services/api';
-import { sampleListings } from '../data/mockData';
 
 export default function Home() {
   const [listings, setListings] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [selectedCondition, setSelectedCondition] = useState('all');
   const [sortBy, setSortBy] = useState('closingSoon');
-  const [dataSource, setDataSource] = useState('loading'); // 'backend' or 'fallback'
 
   const categories = [
     { id: 'all', label: 'All Items' },
@@ -32,20 +40,17 @@ export default function Home() {
 
   const fetchItems = async () => {
     setLoading(true);
+    setError(null);
     try {
-      const data = await getListings();
-      if (Array.isArray(data) && data.length > 0) {
-        setListings(data);
-        setDataSource('backend');
-      } else {
-        // Fallback to sample listings for rich initial demo
-        setListings(sampleListings);
-        setDataSource('fallback');
-      }
+      // Exclusively fetch from MongoDB database
+      const data = await getListings({ status: 'active' });
+      setListings(Array.isArray(data) ? data : []);
     } catch (err) {
-      console.log('Using sample campus listings:', err.message);
-      setListings(sampleListings);
-      setDataSource('fallback');
+      console.error('Failed to fetch database listings:', err);
+      setError(
+        'Unable to connect to the database. Please ensure your backend server is running.'
+      );
+      setListings([]);
     } finally {
       setLoading(false);
     }
@@ -167,13 +172,15 @@ export default function Home() {
                 </select>
               </div>
 
-              {/* Data source badge if fallback */}
-              {dataSource === 'fallback' && (
-                <div className="inline-flex items-center gap-1 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-md">
-                  <AlertCircle className="w-3 h-3" />
-                  Showing demo campus items
-                </div>
-              )}
+              {/* Refresh button */}
+              <button
+                onClick={fetchItems}
+                className="flex items-center gap-1 text-gray-500 hover:text-indigo-600 bg-gray-50 border border-gray-200 rounded-lg px-2.5 py-1.5"
+                title="Refresh database items"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+                <span>Refresh</span>
+              </button>
             </div>
 
             {/* Sort Dropdown */}
@@ -197,22 +204,51 @@ export default function Home() {
         {loading ? (
           <div className="flex flex-col items-center justify-center py-20 text-gray-400">
             <RefreshCw className="w-8 h-8 animate-spin text-indigo-600 mb-3" />
-            <p className="text-sm">Loading active campus auctions...</p>
+            <p className="text-sm font-medium">Loading live campus auctions from database...</p>
+          </div>
+        ) : error ? (
+          <div className="text-center py-16 bg-white rounded-3xl border border-red-200 p-8 shadow-sm">
+            <p className="text-base font-bold text-red-600">{error}</p>
+            <button
+              onClick={fetchItems}
+              className="mt-4 px-5 py-2.5 text-xs font-bold bg-indigo-600 text-white rounded-xl hover:bg-indigo-700"
+            >
+              Retry Database Connection
+            </button>
           </div>
         ) : filteredListings.length === 0 ? (
-          <div className="text-center py-20 bg-white rounded-2xl border border-dashed border-gray-300 p-8">
-            <p className="text-base font-semibold text-gray-700">No auctions matched your filters</p>
-            <p className="text-xs text-gray-500 mt-1">Try clearing filters or search query.</p>
-            <button
-              onClick={() => {
-                setSearchQuery('');
-                setSelectedCategory('all');
-                setSelectedCondition('all');
-              }}
-              className="mt-4 px-4 py-2 text-xs font-semibold bg-indigo-50 text-indigo-700 rounded-lg hover:bg-indigo-100"
-            >
-              Reset Filters
-            </button>
+          /* Empty State when 0 listings exist */
+          <div className="text-center py-20 bg-white rounded-3xl border border-dashed border-gray-300 p-8 shadow-sm">
+            <div className="w-16 h-16 rounded-3xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 mx-auto mb-4">
+              <ShoppingBag className="w-8 h-8" />
+            </div>
+            <h3 className="text-lg font-bold text-gray-800">
+              No active campus auctions right now.
+            </h3>
+            <p className="text-sm text-gray-500 mt-1 max-w-sm mx-auto">
+              Be the first to sell something! List your cycles, calculators, books, or hostel gear to fellow students.
+            </p>
+            <div className="mt-6 flex justify-center gap-3">
+              <Link
+                to="/create"
+                className="inline-flex items-center gap-2 px-5 py-3 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 text-white text-xs font-bold shadow-md shadow-indigo-200 transition-all"
+              >
+                <PlusCircle className="w-4 h-4" />
+                <span>Sell a Product Now</span>
+              </Link>
+              {(searchQuery || selectedCategory !== 'all' || selectedCondition !== 'all') && (
+                <button
+                  onClick={() => {
+                    setSearchQuery('');
+                    setSelectedCategory('all');
+                    setSelectedCondition('all');
+                  }}
+                  className="px-4 py-3 text-xs font-semibold bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl"
+                >
+                  Clear Filters
+                </button>
+              )}
+            </div>
           </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">

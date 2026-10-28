@@ -1,10 +1,22 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { PlusCircle, Upload, ArrowLeft, CheckCircle2, AlertCircle, Info, Sparkles } from 'lucide-react';
+import {
+  PlusCircle,
+  Upload,
+  ArrowLeft,
+  CheckCircle2,
+  AlertCircle,
+  Image as ImageIcon,
+  X,
+  Trash2,
+} from 'lucide-react';
 import { createListing } from '../services/api';
+import { useAuth } from '../context/AuthContext';
+import { formatPhotoUrl } from '../utils/imageHelper';
 
 export default function CreateListing() {
   const navigate = useNavigate();
+  const { user } = useAuth();
 
   // 48 hours default for auction closing
   const defaultClosing = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString().slice(0, 16);
@@ -17,11 +29,9 @@ export default function CreateListing() {
     startingPrice: '',
     minIncrement: '50',
     closingTime: defaultClosing,
-    photoUrl: '',
-    sellerName: 'Senior Student (Graduating Batch)',
   });
 
-  const [photosList, setPhotosList] = useState([]);
+  const [base64Photos, setBase64Photos] = useState([]);
   const [submitting, setSubmitting] = useState(false);
   const [status, setStatus] = useState({ type: null, message: '' });
 
@@ -30,15 +40,37 @@ export default function CreateListing() {
     setFormData((prev) => ({ ...prev, [name]: value }));
   };
 
-  const handleAddPhoto = () => {
-    if (formData.photoUrl.trim()) {
-      setPhotosList((prev) => [...prev, formData.photoUrl.trim()]);
-      setFormData((prev) => ({ ...prev, photoUrl: '' }));
-    }
+  // Convert uploaded files to Base64 data URLs
+  const handleFileUpload = (e) => {
+    const files = Array.from(e.target.files);
+    if (!files.length) return;
+
+    files.forEach((file) => {
+      // Validate file type
+      if (!file.type.startsWith('image/')) {
+        setStatus({ type: 'error', message: 'Please upload valid image files (JPEG, PNG, WebP).' });
+        return;
+      }
+
+      // Check max size (limit to ~4MB per image)
+      if (file.size > 4 * 1024 * 1024) {
+        setStatus({ type: 'error', message: 'Each image must be under 4MB.' });
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = (uploadEvent) => {
+        const base64String = uploadEvent.target.result;
+        setBase64Photos((prev) => [...prev, base64String]);
+      };
+      reader.readAsDataURL(file);
+    });
+
+    e.target.value = ''; // reset file input
   };
 
-  const handleRemovePhoto = (idx) => {
-    setPhotosList((prev) => prev.filter((_, i) => i !== idx));
+  const handleRemovePhoto = (index) => {
+    setBase64Photos((prev) => prev.filter((_, i) => i !== index));
   };
 
   const handleSubmit = async (e) => {
@@ -46,45 +78,43 @@ export default function CreateListing() {
     setSubmitting(true);
     setStatus({ type: null, message: '' });
 
-    const allPhotos = [...photosList];
-    if (formData.photoUrl.trim()) {
-      allPhotos.push(formData.photoUrl.trim());
+    if (!user?._id) {
+      setStatus({ type: 'error', message: 'You must be signed in to list a product.' });
+      setSubmitting(false);
+      return;
     }
 
     const payload = {
-      title: formData.title,
+      title: formData.title.trim(),
       category: formData.category,
-      description: formData.description,
+      description: formData.description.trim(),
       condition: formData.condition,
       startingPrice: parseFloat(formData.startingPrice),
-      currentBid: parseFloat(formData.startingPrice),
       minIncrement: parseFloat(formData.minIncrement) || 50,
       closingTime: new Date(formData.closingTime).toISOString(),
-      photos: allPhotos.length > 0 ? allPhotos : [
-        'https://images.unsplash.com/photo-1526170375885-4d8ecf77b99f?auto=format&fit=crop&w=800&q=80'
-      ],
-      sellerId: 'senior_user_id',
+      photos: base64Photos.length > 0 ? base64Photos : [],
+      sellerId: user._id, // Attach logged-in user ID as sellerId
     };
 
     try {
-      await createListing(payload);
+      const created = await createListing(payload);
       setStatus({
         type: 'success',
-        message: 'Your item is now live in the campus auction!',
+        message: 'Your product auction is live in the database!',
       });
       setTimeout(() => {
-        navigate('/');
-      }, 1500);
+        if (created && created._id) {
+          navigate(`/listing/${created._id}`);
+        } else {
+          navigate('/my-listings');
+        }
+      }, 1200);
     } catch (err) {
-      // Optimistic / simulated fallback confirmation
-      console.warn('Backend unavailable, listing recorded for demo:', err.message);
+      console.error('Error creating listing:', err);
       setStatus({
-        type: 'success',
-        message: 'Listing preview created successfully! Redirecting to marketplace...',
+        type: 'error',
+        message: err.response?.data?.error || err.message || 'Failed to publish listing.',
       });
-      setTimeout(() => {
-        navigate('/');
-      }, 1500);
     } finally {
       setSubmitting(false);
     }
@@ -101,24 +131,33 @@ export default function CreateListing() {
           Back
         </button>
 
-        <div className="bg-white rounded-3xl p-6 sm:p-10 border border-gray-200 shadow-xl">
-          <div className="flex items-center gap-3 mb-2">
-            <div className="w-10 h-10 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600">
-              <PlusCircle className="w-6 h-6" />
+        <div className="bg-white rounded-3xl p-6 sm:p-10 border border-gray-200 shadow-xl shadow-indigo-50/50">
+          <div className="flex items-center justify-between pb-6 border-b border-gray-100">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600">
+                <PlusCircle className="w-6 h-6" />
+              </div>
+              <div>
+                <h1 className="text-2xl font-black text-gray-900">Sell a Product</h1>
+                <p className="text-xs text-gray-500">
+                  List your campus gear directly into the active database.
+                </p>
+              </div>
             </div>
-            <div>
-              <h1 className="text-2xl font-black text-gray-900">List an Item for Auction</h1>
-              <p className="text-xs text-gray-500">
-                Give your gear to junior students while getting the best fair price.
-              </p>
-            </div>
+
+            {user && (
+              <div className="text-right">
+                <span className="text-[10px] uppercase font-bold text-gray-400 block">Seller</span>
+                <span className="text-xs font-bold text-indigo-600">{user.name}</span>
+              </div>
+            )}
           </div>
 
           <form onSubmit={handleSubmit} className="mt-8 space-y-6">
             {/* Title */}
             <div>
               <label className="block text-xs font-bold text-gray-700 uppercase tracking-wide mb-1.5">
-                Item Title *
+                Product Title *
               </label>
               <input
                 type="text"
@@ -196,8 +235,8 @@ export default function CreateListing() {
                   <input
                     type="number"
                     name="startingPrice"
-                    min="0"
-                    step="10"
+                    min="1"
+                    step="1"
                     required
                     value={formData.startingPrice}
                     onChange={handleChange}
@@ -217,7 +256,7 @@ export default function CreateListing() {
                     type="number"
                     name="minIncrement"
                     min="1"
-                    step="10"
+                    step="1"
                     required
                     value={formData.minIncrement}
                     onChange={handleChange}
@@ -240,46 +279,58 @@ export default function CreateListing() {
                 onChange={handleChange}
                 className="w-full px-4 py-3 text-sm bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 font-semibold"
               />
-              <p className="text-[11px] text-gray-400 mt-1">
-                Auctions usually perform best when running between 24 to 72 hours.
-              </p>
             </div>
 
-            {/* Photos */}
+            {/* Base64 Photos Upload */}
             <div>
               <label className="block text-xs font-bold text-gray-700 uppercase tracking-wide mb-1.5">
-                Photo URL
+                Product Photos (Stored securely as Base64 in Database)
               </label>
-              <div className="flex gap-2">
+              <div className="border-2 border-dashed border-gray-300 hover:border-indigo-500 rounded-2xl p-6 text-center bg-gray-50/50 transition-colors">
                 <input
-                  type="url"
-                  name="photoUrl"
-                  value={formData.photoUrl}
-                  onChange={handleChange}
-                  placeholder="https://images.unsplash.com/... or cloud image link"
-                  className="flex-1 px-4 py-3 text-sm bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  type="file"
+                  id="productPhotos"
+                  accept="image/*"
+                  multiple
+                  onChange={handleFileUpload}
+                  className="hidden"
                 />
-                <button
-                  type="button"
-                  onClick={handleAddPhoto}
-                  className="px-4 py-3 bg-gray-100 hover:bg-gray-200 text-gray-800 text-xs font-bold rounded-xl transition-colors"
+                <label
+                  htmlFor="productPhotos"
+                  className="cursor-pointer flex flex-col items-center justify-center gap-2"
                 >
-                  Add Photo
-                </button>
+                  <div className="w-12 h-12 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center">
+                    <ImageIcon className="w-6 h-6" />
+                  </div>
+                  <span className="text-xs font-bold text-indigo-600 hover:underline">
+                    Click to browse and upload photos
+                  </span>
+                  <span className="text-[11px] text-gray-400">
+                    Supports JPEG, PNG, WebP (Converted to Base64)
+                  </span>
+                </label>
               </div>
 
-              {/* Added photos preview */}
-              {photosList.length > 0 && (
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {photosList.map((url, i) => (
-                    <div key={i} className="relative group w-16 h-16 rounded-lg overflow-hidden border border-gray-200">
-                      <img src={url} alt="" className="w-full h-full object-cover" />
+              {/* Photo Previews */}
+              {base64Photos.length > 0 && (
+                <div className="mt-4 flex flex-wrap gap-3">
+                  {base64Photos.map((photo, i) => (
+                    <div
+                      key={i}
+                      className="relative group w-20 h-20 rounded-xl overflow-hidden border border-gray-200 shadow-sm"
+                    >
+                      <img
+                        src={formatPhotoUrl(photo)}
+                        alt={`Upload preview ${i + 1}`}
+                        className="w-full h-full object-cover"
+                      />
                       <button
                         type="button"
                         onClick={() => handleRemovePhoto(i)}
-                        className="absolute inset-0 bg-red-600/80 text-white text-[10px] font-bold opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity"
+                        className="absolute inset-0 bg-red-600/80 text-white text-xs font-bold opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity"
+                        title="Remove photo"
                       >
-                        Remove
+                        <Trash2 className="w-4 h-4" />
                       </button>
                     </div>
                   ))}
@@ -310,7 +361,7 @@ export default function CreateListing() {
               className="w-full py-4 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 text-white font-bold text-sm shadow-md shadow-indigo-200 transition-all disabled:opacity-50 flex items-center justify-center gap-2 active:scale-[0.99]"
             >
               <Upload className="w-4 h-4" />
-              <span>{submitting ? 'Publishing Auction...' : 'Publish Campus Auction'}</span>
+              <span>{submitting ? 'Publishing to Database...' : 'Publish Product Auction'}</span>
             </button>
           </form>
         </div>

@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5001/api';
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -9,24 +9,24 @@ const api = axios.create({
   },
 });
 
+export const registerUser = async ({ name, email, password }) => {
+  const response = await api.post('/users/register', { name, email, password });
+  return response.data;
+};
+
+export const loginUser = async ({ email, password }) => {
+  const response = await api.post('/users/login', { email, password });
+  return response.data;
+};
+
 export const getListings = async (params = {}) => {
-  try {
-    const response = await api.get('/listings', { params });
-    return response.data;
-  } catch (error) {
-    console.warn('API error or server offline, using fallback data if needed:', error.message);
-    throw error;
-  }
+  const response = await api.get('/listings', { params });
+  return response.data;
 };
 
 export const getListingById = async (id) => {
-  try {
-    const response = await api.get(`/listings/${id}`);
-    return response.data;
-  } catch (error) {
-    console.warn(`Error fetching listing ${id}:`, error.message);
-    throw error;
-  }
+  const response = await api.get(`/listings/${id}`);
+  return response.data;
 };
 
 export const createListing = async (listingData) => {
@@ -34,8 +34,12 @@ export const createListing = async (listingData) => {
   return response.data;
 };
 
-export const placeBid = async (listingId, { bidderId, amount }) => {
-  const response = await api.post(`/listings/${listingId}/bids`, { bidderId, amount });
+export const placeBid = async (listingId, { bidderId, bidderName, amount }) => {
+  const response = await api.post(`/listings/${listingId}/bids`, {
+    bidderId,
+    bidderName,
+    amount,
+  });
   return response.data;
 };
 
@@ -51,6 +55,16 @@ export const askQuestion = async (listingId, { userId, question }) => {
 
 export const getQuestions = async (listingId) => {
   const response = await api.get(`/listings/${listingId}/questions`);
+  return response.data;
+};
+
+export const getUserListings = async (userId) => {
+  const response = await api.get(`/users/${userId}/listings`);
+  return response.data;
+};
+
+export const getUserBids = async (userId) => {
+  const response = await api.get(`/users/${userId}/bids`);
   return response.data;
 };
 

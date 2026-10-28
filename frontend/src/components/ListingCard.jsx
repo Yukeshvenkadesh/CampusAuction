@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { Clock, Tag, ArrowUpRight, ShieldCheck, Flame } from 'lucide-react';
+import { formatPhotoUrl } from '../utils/imageHelper';
 
 export default function ListingCard({ listing }) {
   const [timeLeft, setTimeLeft] = useState('');
@@ -34,8 +35,8 @@ export default function ListingCard({ listing }) {
     return () => clearInterval(timer);
   }, [listing.closingTime]);
 
-  const fallbackImage = 'https://images.unsplash.com/photo-1526170375885-4d8ecf77b99f?auto=format&fit=crop&w=800&q=80';
-  const mainImage = listing.photos && listing.photos.length > 0 ? listing.photos[0] : fallbackImage;
+  const rawPhoto = listing.photos && listing.photos.length > 0 ? listing.photos[0] : '';
+  const mainImage = formatPhotoUrl(rawPhoto);
 
   const categoryColors = {
     cycle: 'bg-emerald-50 text-emerald-700 border-emerald-200',
@@ -55,14 +56,17 @@ export default function ListingCard({ listing }) {
           src={mainImage}
           alt={listing.title}
           onError={(e) => {
-            e.currentTarget.src = fallbackImage;
+            e.currentTarget.src =
+              'https://images.unsplash.com/photo-1526170375885-4d8ecf77b99f?auto=format&fit=crop&w=800&q=80';
           }}
           className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
         />
 
         {/* Category & Condition Badges */}
         <div className="absolute top-3 left-3 flex flex-wrap gap-1.5">
-          <span className={`text-xs font-semibold px-2.5 py-1 rounded-full border backdrop-blur-sm uppercase tracking-wide ${badgeColor}`}>
+          <span
+            className={`text-xs font-semibold px-2.5 py-1 rounded-full border backdrop-blur-sm uppercase tracking-wide ${badgeColor}`}
+          >
             {listing.category}
           </span>
           <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-white/90 text-gray-800 shadow-sm border border-gray-200 flex items-center gap-1">
@@ -75,9 +79,7 @@ export default function ListingCard({ listing }) {
         <div className="absolute bottom-3 right-3">
           <div
             className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full shadow-md backdrop-blur-md ${
-              isExpired
-                ? 'bg-red-500/90 text-white'
-                : 'bg-gray-900/80 text-white'
+              isExpired ? 'bg-red-500/90 text-white' : 'bg-gray-900/80 text-white'
             }`}
           >
             <Clock className="w-3.5 h-3.5 text-amber-400" />
@@ -92,9 +94,7 @@ export default function ListingCard({ listing }) {
           <h3 className="text-base font-bold text-gray-900 group-hover:text-indigo-600 transition-colors line-clamp-1">
             {listing.title}
           </h3>
-          <p className="mt-1.5 text-xs text-gray-500 line-clamp-2">
-            {listing.description}
-          </p>
+          <p className="mt-1.5 text-xs text-gray-500 line-clamp-2">{listing.description}</p>
         </div>
 
         {/* Pricing info */}
@@ -108,9 +108,7 @@ export default function ListingCard({ listing }) {
                 <span className="text-lg font-extrabold text-indigo-600">
                   ₹{listing.currentBid || listing.startingPrice}
                 </span>
-                <span className="text-[11px] text-gray-400">
-                  (start: ₹{listing.startingPrice})
-                </span>
+                <span className="text-[11px] text-gray-400">(start: ₹{listing.startingPrice})</span>
               </div>
             </div>
 
