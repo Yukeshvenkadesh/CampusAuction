@@ -20,6 +20,8 @@ import {
   CornerDownRight,
   Edit3,
   AlertTriangle,
+  Bot,
+  Shield,
 } from 'lucide-react';
 import { getListingById, placeBid, askQuestion, answerQuestion } from '../services/api';
 import { socket } from '../services/socket';
@@ -39,6 +41,8 @@ export default function ListingDetail() {
 
   // Bidding form states
   const [bidAmount, setBidAmount] = useState('');
+  const [isAutoBidMode, setIsAutoBidMode] = useState(false);
+  const [maxAutoBid, setMaxAutoBid] = useState('');
   const [bidStatus, setBidStatus] = useState({ type: null, message: '' });
   const [submittingBid, setSubmittingBid] = useState(false);
 
@@ -62,9 +66,12 @@ export default function ListingDetail() {
       setLoading(true);
       setError(null);
       try {
-        const data = await getListingById(id);
+        const data = await getListingById(id, user?._id);
         if (data && data._id) {
           setListing(data);
+          if (data.userProxy?.maxAmount) {
+            setMaxAutoBid(data.userProxy.maxAmount.toString());
+          }
         } else {
           setError('Listing not found in database.');
         }
@@ -77,7 +84,7 @@ export default function ListingDetail() {
     };
 
     fetchDetail();
-  }, [id]);
+  }, [id, user?._id]);
 
   // Real-Time Socket.io Connection & Room Listener
   useEffect(() => {
@@ -107,12 +114,20 @@ export default function ListingDetail() {
           return {
             ...prev,
             currentBid: data.currentBid,
+            hasProxyLead:
+              data.hasProxyLead !== undefined
+                ? data.hasProxyLead
+                : data.isAutoBid || prev.hasProxyLead,
             bids: updatedBids,
           };
         });
 
         const bidder = data.bid?.bidderId?.name || 'A bidder';
-        setLiveNotification(`⚡ Live: ${bidder} placed a new highest bid of ₹${data.currentBid}!`);
+        if (data.isAutoBid) {
+          setLiveNotification(`🤖 Auto-Bid: ${bidder}'s automated proxy defended the lead with ₹${data.currentBid}!`);
+        } else {
+          setLiveNotification(`⚡ Live: ${bidder} placed a new highest bid of ₹${data.currentBid}!`);
+        }
         setTimeout(() => setLiveNotification(''), 4500);
       }
     };
@@ -244,14 +259,26 @@ export default function ListingDetail() {
       return;
     }
 
-    const numAmount = parseFloat(bidAmount);
+    const numAmount = parseFloat(bidAmount) || minRequiredBid;
 
-    if (isNaN(numAmount) || numAmount < minRequiredBid) {
-      setBidStatus({
-        type: 'error',
-        message: `Your bid must be at least ₹${minRequiredBid} (minimum increment of ₹${minIncrement}).`,
-      });
-      return;
+    let numMax = null;
+    if (isAutoBidMode) {
+      numMax = parseFloat(maxAutoBid);
+      if (isNaN(numMax) || numMax < minRequiredBid) {
+        setBidStatus({
+          type: 'error',
+          message: `Auto-bid ceiling must be at least the next required bid (₹${minRequiredBid}).`,
+        });
+        return;
+      }
+    } else {
+      if (isNaN(numAmount) || numAmount < minRequiredBid) {
+        setBidStatus({
+          type: 'error',
+          message: `Your bid must be at least ₹${minRequiredBid} (minimum increment of ₹${minIncrement}).`,
+        });
+        return;
+      }
     }
 
     setSubmittingBid(true);
@@ -262,26 +289,36 @@ export default function ListingDetail() {
         bidderId: user._id,
         bidderName: user.name,
         amount: numAmount,
+        maxAmount: isAutoBidMode ? numMax : undefined,
       });
+
+      const effectiveBidAmount = response.currentBid || numAmount;
 
       const newBidEntry = response.bid || {
         _id: 'bid-' + Date.now(),
-        amount: numAmount,
+        amount: effectiveBidAmount,
         createdAt: new Date().toISOString(),
         bidderId: { name: user.name, email: user.email },
+        isProxy: isAutoBidMode,
       };
 
       setListing((prev) => ({
         ...prev,
-        currentBid: numAmount,
-        bids: [newBidEntry, ...(prev.bids || [])],
+        currentBid: effectiveBidAmount,
+        hasProxyLead: response.hasProxyLead !== undefined ? response.hasProxyLead : isAutoBidMode,
+        userProxy: isAutoBidMode ? { maxAmount: numMax } : prev?.userProxy,
+        bids: [newBidEntry, ...(prev.bids || []).filter((b) => b._id !== newBidEntry._id)],
       }));
 
       setBidStatus({
         type: 'success',
-        message: `Success! You are now the highest bidder at ₹${numAmount}.`,
+        message:
+          response.message ||
+          (isAutoBidMode
+            ? `Auto-bid ceiling of ₹${numMax} registered! System placed your lead bid.`
+            : `Success! You are now the highest bidder at ₹${numAmount}.`),
       });
-      setBidAmount((numAmount + minIncrement).toString());
+      setBidAmount((effectiveBidAmount + minIncrement).toString());
     } catch (err) {
       setBidStatus({
         type: 'error',
@@ -690,6 +727,27 @@ export default function ListingDetail() {
                 </div>
               </div>
 
+              {/* Auto-Bidder Holding Lead Badge */}
+              {listing?.hasProxyLead && (
+                <div className="mt-3.5 p-3 rounded-2xl bg-amber-50/90 border border-amber-200 text-amber-900 text-xs font-bold flex items-center justify-between shadow-xs animate-fadeIn">
+                  <div className="flex items-center gap-2">
+                    <Zap className="w-4 h-4 text-amber-500 fill-amber-500 animate-pulse shrink-0" />
+                    <span>Auto-Bidder Holding Lead (Proxy Active)</span>
+                  </div>
+                  <span className="text-[10px] font-extrabold uppercase bg-amber-200/70 px-2 py-0.5 rounded-md text-amber-950">
+                    Proxy Lead
+                  </span>
+                </div>
+              )}
+
+              {/* User Active Proxy Cap Indicator */}
+              {listing?.userProxy && (
+                <div className="mt-2.5 p-2.5 rounded-xl bg-indigo-50 border border-indigo-200/70 text-indigo-900 text-xs font-semibold flex items-center justify-between">
+                  <span className="text-[11px] text-indigo-700 font-medium">Your Auto-Bid is active</span>
+                  <span className="font-extrabold text-indigo-900">Cap: ₹{listing.userProxy.maxAmount}</span>
+                </div>
+              )}
+
               {/* Cancelled Box, Seller Management Box, or Buyer Bid Form */}
               {listing?.status === 'cancelled' ? (
                 <div className="mt-6 p-5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-900 shadow-sm animate-fadeIn">
@@ -741,31 +799,90 @@ export default function ListingDetail() {
                   ) : (
                     <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-800 flex items-center gap-2">
                       <LogIn className="w-4 h-4 shrink-0" />
-                      <span>Please sign in to place a verified bid.</span>
+                      <span>Please sign in to place a verified bid or auto-bid.</span>
                     </div>
                   )}
 
-                  <div>
-                    <label className="block text-xs font-bold text-gray-700 uppercase tracking-wide mb-1.5">
-                      Bid Amount (₹)
-                    </label>
-                    <div className="relative">
-                      <span className="absolute left-4 top-3 text-sm font-bold text-gray-400">₹</span>
-                      <input
-                        type="number"
-                        value={bidAmount}
-                        onChange={(e) => setBidAmount(e.target.value)}
-                        min={minRequiredBid}
-                        step={minIncrement}
-                        required
-                        disabled={isExpired}
-                        className="w-full pl-8 pr-4 py-3 text-lg font-bold text-gray-900 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                      />
-                    </div>
-                    <p className="text-[11px] text-gray-400 mt-1">
-                      Minimum allowed bid is ₹{minRequiredBid} (+₹{minIncrement} increment).
-                    </p>
+                  {/* Mode Selector Tabs */}
+                  <div className="grid grid-cols-2 p-1 bg-gray-100 rounded-2xl border border-gray-200 text-xs font-bold">
+                    <button
+                      type="button"
+                      onClick={() => setIsAutoBidMode(false)}
+                      className={`py-2 px-3 rounded-xl transition-all ${
+                        !isAutoBidMode
+                          ? 'bg-white text-indigo-700 shadow-xs'
+                          : 'text-gray-500 hover:text-gray-800'
+                      }`}
+                    >
+                      ⚡ Standard Bid
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsAutoBidMode(true)}
+                      className={`py-2 px-3 rounded-xl flex items-center justify-center gap-1.5 transition-all ${
+                        isAutoBidMode
+                          ? 'bg-white text-indigo-700 shadow-xs'
+                          : 'text-gray-500 hover:text-gray-800'
+                      }`}
+                    >
+                      <Zap className="w-3.5 h-3.5 text-amber-500 fill-amber-500" />
+                      <span>Auto-Bid / Set Max</span>
+                    </button>
                   </div>
+
+                  {!isAutoBidMode ? (
+                    <div>
+                      <label className="block text-xs font-bold text-gray-700 uppercase tracking-wide mb-1.5">
+                        Bid Amount (₹)
+                      </label>
+                      <div className="relative">
+                        <span className="absolute left-4 top-3 text-sm font-bold text-gray-400">₹</span>
+                        <input
+                          type="number"
+                          value={bidAmount}
+                          onChange={(e) => setBidAmount(e.target.value)}
+                          min={minRequiredBid}
+                          step={minIncrement}
+                          required
+                          disabled={isExpired}
+                          className="w-full pl-8 pr-4 py-3 text-lg font-bold text-gray-900 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        />
+                      </div>
+                      <p className="text-[11px] text-gray-400 mt-1">
+                        Minimum allowed bid is ₹{minRequiredBid} (+₹{minIncrement} increment).
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3 p-3.5 rounded-2xl bg-indigo-50/50 border border-indigo-100 animate-fadeIn">
+                      <div>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <label className="block text-xs font-bold text-indigo-950 uppercase tracking-wide">
+                            Maximum Auto-Bid Limit (₹) *
+                          </label>
+                          <span className="text-[10px] text-indigo-600 font-bold bg-indigo-100/70 px-2 py-0.5 rounded-full">
+                            Automatic Proxy
+                          </span>
+                        </div>
+                        <div className="relative">
+                          <span className="absolute left-4 top-3 text-sm font-bold text-gray-400">₹</span>
+                          <input
+                            type="number"
+                            value={maxAutoBid}
+                            onChange={(e) => setMaxAutoBid(e.target.value)}
+                            placeholder={`e.g. ${minRequiredBid + minIncrement * 4}`}
+                            min={minRequiredBid}
+                            step={minIncrement}
+                            required
+                            disabled={isExpired}
+                            className="w-full pl-8 pr-4 py-3 text-lg font-bold text-gray-900 bg-white border border-indigo-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                          />
+                        </div>
+                        <p className="text-[11px] text-indigo-800 mt-1.5 leading-relaxed font-medium">
+                          🛡️ <strong>How Auto-Bid Works:</strong> You set your absolute maximum ceiling. The system immediately places a minimum winning bid (₹{minRequiredBid}), and automatically counter-bids by ₹{minIncrement} whenever another student bids, keeping you safely in the lead without paying more than necessary.
+                        </p>
+                      </div>
+                    </div>
+                  )}
 
                   {bidStatus.message && (
                     <div
@@ -789,12 +906,18 @@ export default function ListingDetail() {
                     disabled={submittingBid || isExpired}
                     className="w-full py-3.5 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 text-white font-bold text-sm shadow-md shadow-indigo-200 disabled:opacity-50 transition-all active:scale-[0.99] flex items-center justify-center gap-2"
                   >
-                    <Gavel className="w-4 h-4" />
+                    {isAutoBidMode ? (
+                      <Zap className="w-4 h-4 text-amber-300 fill-amber-300" />
+                    ) : (
+                      <Gavel className="w-4 h-4" />
+                    )}
                     <span>
                       {isExpired
                         ? 'Auction Ended'
                         : !isAuthenticated
                         ? 'Sign In to Bid'
+                        : isAutoBidMode
+                        ? `Activate Auto-Bid (Up to ₹${maxAutoBid || minRequiredBid})`
                         : 'Place Live Bid'}
                     </span>
                   </button>

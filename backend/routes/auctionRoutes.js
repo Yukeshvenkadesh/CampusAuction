@@ -9,6 +9,7 @@ const Bid = require('../models/Bid');
 const Question = require('../models/Question');
 const Alert = require('../models/Alert');
 const Notification = require('../models/Notification');
+const ProxyBid = require('../models/ProxyBid');
 
 // Helper to safely resolve or create a valid Mongoose User ObjectId
 async function resolveUser(userId, fallbackRole = 'buyer', fallbackName = 'Campus Student') {
@@ -241,10 +242,35 @@ router.get('/listings/:id', async (req, res) => {
       .populate('userId', 'name email role')
       .sort({ createdAt: -1 });
 
+    // Check if an auto-bidder currently holds a proxy lead on this item
+    let hasProxyLead = false;
+    if (bids.length > 0) {
+      const topBid = bids[0];
+      const highestBidderId = topBid?.bidderId?._id || topBid?.bidderId;
+      if (highestBidderId) {
+        const leaderProxy = await ProxyBid.findOne({
+          listingId: id,
+          userId: highestBidderId,
+          active: true,
+          maxAmount: { $gt: listing.currentBid },
+        });
+        hasProxyLead = Boolean(leaderProxy || topBid.isProxy);
+      }
+    }
+
+    // Check requesting user's own proxy bid if userId provided
+    let userProxy = null;
+    const reqUserId = req.query.userId || req.headers['x-user-id'];
+    if (reqUserId && mongoose.Types.ObjectId.isValid(reqUserId)) {
+      userProxy = await ProxyBid.findOne({ listingId: id, userId: reqUserId, active: true });
+    }
+
     res.json({
       ...listing.toObject(),
       bids,
       questions,
+      hasProxyLead,
+      userProxy,
     });
   } catch (err) {
     console.error('Error fetching listing details:', err);
@@ -431,13 +457,87 @@ router.delete('/listings/:id', async (req, res) => {
 
 
 /**
+ * -------------------------------------------------------------
+ * AUTOMATIC PROXY BIDDING ENGINE
+ * -------------------------------------------------------------
+ */
+
+/**
+ * Whenever any bid is placed, this trigger checks if any other user has an active proxy bid
+ * higher than currentBid + minIncrement. If found, it automatically places an incremental counter-bid
+ * on their behalf, keeping them safely in the lead up to their specified cap.
+ */
+async function executeProxyBiddingTrigger(listing, io) {
+  let safetyIterations = 0;
+  const maxIterations = 20;
+
+  while (safetyIterations < maxIterations) {
+    safetyIterations++;
+
+    // Refresh listing to get latest currentBid
+    const currentListing = await Listing.findById(listing._id);
+    if (!currentListing || currentListing.status !== 'active') break;
+
+    // Get current leader
+    const latestBid = await Bid.findOne({ listingId: listing._id })
+      .sort({ amount: -1, createdAt: -1 });
+
+    const leaderId = latestBid ? latestBid.bidderId.toString() : null;
+    const currentAmount = currentListing.currentBid;
+    const minIncrement = currentListing.minIncrement || 10;
+    const nextRequiredBid = currentAmount + minIncrement;
+
+    // Find any competing user with an active proxy bid who can afford the next required bid
+    const competingProxy = await ProxyBid.findOne({
+      listingId: listing._id,
+      active: true,
+      userId: { $ne: leaderId },
+      maxAmount: { $gte: nextRequiredBid },
+    }).sort({ maxAmount: -1, createdAt: 1 });
+
+    if (!competingProxy) {
+      // No competitor has an active proxy capable of outbidding
+      break;
+    }
+
+    // Place automated counter-bid
+    const autoBidAmount = nextRequiredBid;
+    const autoBid = new Bid({
+      listingId: listing._id,
+      bidderId: competingProxy.userId,
+      amount: autoBidAmount,
+      isProxy: true,
+    });
+    await autoBid.save();
+
+    currentListing.currentBid = autoBidAmount;
+    await currentListing.save();
+
+    const populatedAutoBid = await Bid.findById(autoBid._id).populate('bidderId', 'name email role');
+
+    if (io) {
+      io.to(listing._id.toString()).emit('bidUpdate', {
+        listingId: listing._id.toString(),
+        currentBid: currentListing.currentBid,
+        minIncrement: currentListing.minIncrement,
+        nextMinBid: currentListing.currentBid + currentListing.minIncrement,
+        bid: populatedAutoBid,
+        isAutoBid: true,
+        hasProxyLead: true,
+      });
+      console.log(`🤖 [Proxy Engine] Auto counter-bid ₹${autoBidAmount} placed for user ${competingProxy.userId}`);
+    }
+  }
+}
+
+/**
  * 4. POST /api/listings/:id/bid & /api/listings/:id/bids
- * Place a new bid on a listing with validation
+ * Place a new bid or register an automatic proxy bidding ceiling
  */
 const handlePlaceBid = async (req, res) => {
   try {
     const { id } = req.params;
-    const { amount, bidderId, bidderName } = req.body;
+    const { amount, maxAmount, bidderId, bidderName } = req.body;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ error: 'Invalid listing ID format.' });
@@ -448,7 +548,7 @@ const handlePlaceBid = async (req, res) => {
       return res.status(404).json({ error: 'Listing not found.' });
     }
 
-    // 1. Ensure auction is not closed
+    // 1. Ensure auction is not closed or cancelled
     const isPastClosing = new Date() > new Date(listing.closingTime);
     if (listing.status !== 'active' || isPastClosing) {
       return res.status(400).json({
@@ -456,30 +556,7 @@ const handlePlaceBid = async (req, res) => {
       });
     }
 
-    const numAmount = Number(amount);
-    if (isNaN(numAmount) || numAmount <= 0) {
-      return res.status(400).json({ error: 'Please provide a valid positive bid amount.' });
-    }
-
-    // 2. Validate bid amount against startingPrice or currentBid + minIncrement
-    const existingBidsCount = await Bid.countDocuments({ listingId: listing._id });
-
-    let minRequiredAmount;
-    if (existingBidsCount === 0) {
-      // First bid must be at least the starting price
-      minRequiredAmount = listing.startingPrice;
-    } else {
-      // Subsequent bids must exceed current bid by at least minIncrement
-      minRequiredAmount = listing.currentBid + listing.minIncrement;
-    }
-
-    if (numAmount < minRequiredAmount) {
-      return res.status(400).json({
-        error: `Bid amount ₹${numAmount} is too low. Minimum required bid is ₹${minRequiredAmount} (Starting: ₹${listing.startingPrice}, Current: ₹${listing.currentBid}, Min increment: +₹${listing.minIncrement}).`,
-      });
-    }
-
-    // Resolve bidder to valid ObjectId
+    // Resolve bidder
     const resolvedBidderId = await resolveUser(bidderId, 'buyer', bidderName || 'Campus Bidder');
 
     // Prevent sellers from bidding on their own listings
@@ -488,11 +565,75 @@ const handlePlaceBid = async (req, res) => {
       return res.status(400).json({ error: 'Sellers cannot place bids on their own items.' });
     }
 
+    // Calculate minimum required bid
+    const existingBidsCount = await Bid.countDocuments({ listingId: listing._id });
+    const minRequiredAmount =
+      existingBidsCount === 0 ? listing.startingPrice : listing.currentBid + listing.minIncrement;
+
+    // Check if user is already the current leader
+    const currentLeaderBid = await Bid.findOne({ listingId: listing._id }).sort({ amount: -1, createdAt: -1 });
+    const isAlreadyLeader = currentLeaderBid && currentLeaderBid.bidderId.toString() === resolvedBidderId.toString();
+
+    // Check if user is setting or updating an automated proxy bid
+    const numMaxAmount =
+      maxAmount !== undefined && maxAmount !== null && maxAmount !== ''
+        ? Number(maxAmount)
+        : null;
+
+    if (numMaxAmount !== null) {
+      if (isNaN(numMaxAmount) || numMaxAmount < minRequiredAmount) {
+        return res.status(400).json({
+          error: `Auto-bid maximum budget must be at least the next required bid (₹${minRequiredAmount}).`,
+        });
+      }
+
+      // Save/update ProxyBid
+      await ProxyBid.findOneAndUpdate(
+        { listingId: listing._id, userId: resolvedBidderId },
+        { maxAmount: numMaxAmount, active: true },
+        { upsert: true, new: true }
+      );
+
+      // If user is already leading the auction, just update their ceiling without forcing self-outbid
+      if (isAlreadyLeader) {
+        return res.status(200).json({
+          message: `Auto-bid maximum limit updated to ₹${numMaxAmount}! You are currently leading the auction.`,
+          currentBid: listing.currentBid,
+          maxAmount: numMaxAmount,
+          isLeader: true,
+          hasProxyLead: true,
+        });
+      }
+    }
+
+    // Determine initial bid amount
+    let numAmount = Number(amount);
+    if (isNaN(numAmount) || numAmount <= 0) {
+      if (numMaxAmount !== null) {
+        numAmount = minRequiredAmount; // Default to minimum required when setting auto-bid
+      } else {
+        return res.status(400).json({ error: 'Please provide a valid positive bid amount.' });
+      }
+    }
+
+    if (numAmount < minRequiredAmount) {
+      return res.status(400).json({
+        error: `Bid amount ₹${numAmount} is too low. Minimum required bid is ₹${minRequiredAmount} (Starting: ₹${listing.startingPrice}, Current: ₹${listing.currentBid}, Min increment: +₹${listing.minIncrement}).`,
+      });
+    }
+
+    if (numMaxAmount !== null && numAmount > numMaxAmount) {
+      return res.status(400).json({
+        error: `Initial bid amount ₹${numAmount} cannot exceed your maximum budget cap of ₹${numMaxAmount}.`,
+      });
+    }
+
     // 3. Save new Bid
     const newBid = new Bid({
       listingId: listing._id,
       bidderId: resolvedBidderId,
       amount: numAmount,
+      isProxy: Boolean(numMaxAmount !== null),
     });
     const savedBid = await newBid.save();
 
@@ -500,9 +641,9 @@ const handlePlaceBid = async (req, res) => {
     listing.currentBid = numAmount;
     await listing.save();
 
-    const populatedBid = await Bid.findById(savedBid._id).populate('bidderId', 'name email');
+    const populatedBid = await Bid.findById(savedBid._id).populate('bidderId', 'name email role');
 
-    // Emit real-time WebSocket event to all clients viewing this listing
+    // Emit real-time WebSocket event for initial bid
     const io = req.app.get('io');
     if (io) {
       io.to(listing._id.toString()).emit('bidUpdate', {
@@ -511,14 +652,32 @@ const handlePlaceBid = async (req, res) => {
         minIncrement: listing.minIncrement,
         nextMinBid: listing.currentBid + listing.minIncrement,
         bid: populatedBid,
+        hasProxyLead: Boolean(numMaxAmount !== null),
       });
-      console.log(`📢 Emitted bidUpdate event to listing room: ${listing._id}`);
     }
 
+    // 5. Automated Background Trigger: Check competing proxy bids and counter-bid automatically
+    await executeProxyBiddingTrigger(listing, io);
+
+    // Re-fetch listing to return updated state after any proxy resolution
+    const finalListing = await Listing.findById(listing._id);
+    const finalLeaderBid = await Bid.findOne({ listingId: listing._id })
+      .populate('bidderId', 'name email role')
+      .sort({ amount: -1, createdAt: -1 });
+
+    const finalLeaderId = finalLeaderBid?.bidderId?._id || finalLeaderBid?.bidderId;
+    const activeLeaderProxy = finalLeaderId
+      ? await ProxyBid.findOne({ listingId: listing._id, userId: finalLeaderId, active: true })
+      : null;
+
     res.status(201).json({
-      message: 'Bid placed successfully!',
-      bid: populatedBid,
-      currentBid: listing.currentBid,
+      message:
+        numMaxAmount !== null
+          ? 'Auto-bid ceiling registered and proxy bid placed!'
+          : 'Bid placed successfully!',
+      bid: finalLeaderBid || populatedBid,
+      currentBid: finalListing.currentBid,
+      hasProxyLead: Boolean(activeLeaderProxy || finalLeaderBid?.isProxy),
     });
   } catch (err) {
     console.error('Error placing bid:', err);
@@ -528,6 +687,30 @@ const handlePlaceBid = async (req, res) => {
 
 router.post('/listings/:id/bid', handlePlaceBid);
 router.post('/listings/:id/bids', handlePlaceBid);
+
+/**
+ * Dedicated Proxy Bid Route: POST /api/listings/:id/proxy-bid
+ */
+router.post('/listings/:id/proxy-bid', async (req, res) => {
+  req.body.maxAmount = req.body.maxAmount || req.body.maxBudget;
+  req.body.bidderId = req.body.bidderId || req.body.userId;
+  req.body.bidderName = req.body.bidderName || req.body.userName;
+  return handlePlaceBid(req, res);
+});
+
+/**
+ * GET /api/listings/:id/proxy-bid/:userId
+ * Check if the user has an active proxy bid ceiling on this listing
+ */
+router.get('/listings/:id/proxy-bid/:userId', async (req, res) => {
+  try {
+    const { id, userId } = req.params;
+    const proxy = await ProxyBid.findOne({ listingId: id, userId, active: true });
+    res.json({ proxyBid: proxy });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch proxy bid status' });
+  }
+});
 
 /**
  * 5. POST /api/listings/:id/questions

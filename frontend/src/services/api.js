@@ -24,8 +24,9 @@ export const getListings = async (params = {}) => {
   return response.data;
 };
 
-export const getListingById = async (id) => {
-  const response = await api.get(`/listings/${id}`);
+export const getListingById = async (id, userId) => {
+  const params = userId ? { userId } : {};
+  const response = await api.get(`/listings/${id}`, { params });
   return response.data;
 };
 
@@ -47,12 +48,26 @@ export const deleteListing = async (listingId, userId, hardDelete = false) => {
   return response.data;
 };
 
-export const placeBid = async (listingId, { bidderId, bidderName, amount }) => {
+export const placeBid = async (listingId, { bidderId, bidderName, amount, maxAmount }) => {
   const response = await api.post(`/listings/${listingId}/bids`, {
     bidderId,
     bidderName,
     amount,
+    maxAmount,
   });
+  return response.data;
+};
+
+export const setProxyBid = async (listingId, { userId, maxAmount }) => {
+  const response = await api.post(`/listings/${listingId}/proxy-bid`, {
+    userId,
+    maxAmount,
+  });
+  return response.data;
+};
+
+export const getProxyBid = async (listingId, userId) => {
+  const response = await api.get(`/listings/${listingId}/proxy-bid/${userId}`);
   return response.data;
 };
 

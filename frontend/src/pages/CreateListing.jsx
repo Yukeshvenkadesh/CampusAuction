@@ -340,11 +340,10 @@ export default function CreateListing() {
 
             {status.message && (
               <div
-                className={`p-4 rounded-xl text-xs font-semibold flex items-center gap-2 ${
-                  status.type === 'error'
+                className={`p-4 rounded-xl text-xs font-semibold flex items-center gap-2 ${status.type === 'error'
                     ? 'bg-red-50 text-red-700 border border-red-200'
                     : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                }`}
+                  }`}
               >
                 {status.type === 'error' ? (
                   <AlertCircle className="w-4 h-4 shrink-0" />
