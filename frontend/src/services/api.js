@@ -53,6 +53,14 @@ export const askQuestion = async (listingId, { userId, question }) => {
   return response.data;
 };
 
+export const answerQuestion = async (listingId, questionId, { userId, answer }) => {
+  const response = await api.post(`/listings/${listingId}/questions/${questionId}/answer`, {
+    userId,
+    answer,
+  });
+  return response.data;
+};
+
 export const getQuestions = async (listingId) => {
   const response = await api.get(`/listings/${listingId}/questions`);
   return response.data;

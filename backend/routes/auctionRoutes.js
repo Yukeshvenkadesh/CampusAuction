@@ -308,6 +308,14 @@ router.post('/listings/:id/questions', async (req, res) => {
         return res.status(400).json({ error: 'Invalid question ID format.' });
       }
 
+      // Verify that the user is the seller of this listing
+      const sellerIdStr = (listing.sellerId?._id || listing.sellerId).toString();
+      if (!userId || sellerIdStr !== userId.toString()) {
+        return res.status(403).json({
+          error: 'Only the seller can answer questions for this listing.',
+        });
+      }
+
       const existingQuestion = await Question.findOne({ _id: questionId, listingId: id });
       if (!existingQuestion) {
         return res.status(404).json({ error: 'Question not found on this listing.' });
@@ -316,6 +324,16 @@ router.post('/listings/:id/questions', async (req, res) => {
       existingQuestion.answer = (answer || '').trim();
       const updated = await existingQuestion.save();
       const populated = await Question.findById(updated._id).populate('userId', 'name email');
+
+      // Emit real-time Socket.io event
+      const io = req.app.get('io');
+      if (io) {
+        io.to(id.toString()).emit('questionAnswered', {
+          listingId: id.toString(),
+          question: populated,
+        });
+      }
+
       return res.json({ message: 'Answer updated successfully', question: populated });
     }
 
@@ -336,6 +354,15 @@ router.post('/listings/:id/questions', async (req, res) => {
     const saved = await newQuestion.save();
     const populated = await Question.findById(saved._id).populate('userId', 'name email');
 
+    // Emit real-time Socket.io event for new question
+    const io = req.app.get('io');
+    if (io) {
+      io.to(id.toString()).emit('questionPosted', {
+        listingId: id.toString(),
+        question: populated,
+      });
+    }
+
     res.status(201).json({
       message: 'Question posted successfully!',
       question: populated,
@@ -343,6 +370,64 @@ router.post('/listings/:id/questions', async (req, res) => {
   } catch (err) {
     console.error('Error with question endpoint:', err);
     res.status(500).json({ error: 'Failed to handle question', details: err.message });
+  }
+});
+
+/**
+ * Dedicated Endpoint: POST /api/listings/:id/questions/:questionId/answer
+ * Allows seller to answer a question with sellerId verification
+ */
+router.post('/listings/:id/questions/:questionId/answer', async (req, res) => {
+  try {
+    const { id, questionId } = req.params;
+    const { answer, userId } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(id) || !mongoose.Types.ObjectId.isValid(questionId)) {
+      return res.status(400).json({ error: 'Invalid ID format.' });
+    }
+
+    if (!answer || !answer.trim()) {
+      return res.status(400).json({ error: 'Answer cannot be empty.' });
+    }
+
+    const listing = await Listing.findById(id);
+    if (!listing) {
+      return res.status(404).json({ error: 'Listing not found.' });
+    }
+
+    // Verify that the user making the request is the owner (sellerId) of the listing
+    const sellerIdStr = (listing.sellerId?._id || listing.sellerId).toString();
+    if (!userId || sellerIdStr !== userId.toString()) {
+      return res.status(403).json({
+        error: 'Only the seller can answer questions for this listing.',
+      });
+    }
+
+    const questionDoc = await Question.findOne({ _id: questionId, listingId: id });
+    if (!questionDoc) {
+      return res.status(404).json({ error: 'Question not found on this listing.' });
+    }
+
+    questionDoc.answer = answer.trim();
+    const saved = await questionDoc.save();
+    const populated = await Question.findById(saved._id).populate('userId', 'name email');
+
+    // Emit real-time Socket.io event
+    const io = req.app.get('io');
+    if (io) {
+      io.to(id.toString()).emit('questionAnswered', {
+        listingId: id.toString(),
+        question: populated,
+      });
+    }
+
+    res.json({
+      message: 'Answer submitted successfully!',
+      question: populated,
+    });
+  } catch (err) {
+    console.error('Error answering question:', err);
+    res.status(500).json({ error: 'Failed to submit answer', details: err.message });
   }
 });
 

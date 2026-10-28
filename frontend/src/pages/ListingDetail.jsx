@@ -16,8 +16,10 @@ import {
   Calendar,
   Zap,
   LogIn,
+  MessageSquare,
+  CornerDownRight,
 } from 'lucide-react';
-import { getListingById, placeBid, askQuestion } from '../services/api';
+import { getListingById, placeBid, askQuestion, answerQuestion } from '../services/api';
 import { socket } from '../services/socket';
 import { useAuth } from '../context/AuthContext';
 import { formatPhotoUrl } from '../utils/imageHelper';
@@ -46,6 +48,8 @@ export default function ListingDetail() {
   const [newQuestion, setNewQuestion] = useState('');
   const [questionStatus, setQuestionStatus] = useState({ type: null, message: '' });
   const [submittingQuestion, setSubmittingQuestion] = useState(false);
+  const [replyTextMap, setReplyTextMap] = useState({});
+  const [submittingReplyId, setSubmittingReplyId] = useState(null);
 
   // Countdown timer state
   const [timeLeft, setTimeLeft] = useState('');
@@ -111,11 +115,43 @@ export default function ListingDetail() {
       }
     };
 
+    const handleQuestionPosted = (data) => {
+      if (data.listingId === id) {
+        setListing((prev) => {
+          if (!prev) return prev;
+          const exists = (prev.questions || []).some((q) => q._id === data.question?._id);
+          if (exists) return prev;
+          return {
+            ...prev,
+            questions: [...(prev.questions || []), data.question],
+          };
+        });
+      }
+    };
+
+    const handleQuestionAnswered = (data) => {
+      if (data.listingId === id) {
+        setListing((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            questions: (prev.questions || []).map((q) =>
+              q._id === data.question?._id ? data.question : q
+            ),
+          };
+        });
+      }
+    };
+
     socket.on('bidUpdate', handleBidUpdate);
+    socket.on('questionPosted', handleQuestionPosted);
+    socket.on('questionAnswered', handleQuestionAnswered);
 
     return () => {
       socket.emit('leaveListing', id);
       socket.off('bidUpdate', handleBidUpdate);
+      socket.off('questionPosted', handleQuestionPosted);
+      socket.off('questionAnswered', handleQuestionAnswered);
       socket.off('connect', onConnect);
       socket.off('disconnect', onDisconnect);
     };
@@ -268,6 +304,40 @@ export default function ListingDetail() {
     }
   };
 
+  const handleAnswerQuestion = async (questionId) => {
+    const answerText = replyTextMap[questionId]?.trim();
+    if (!answerText) return;
+
+    if (!isSeller) {
+      alert('Only the seller of this listing can submit answers.');
+      return;
+    }
+
+    setSubmittingReplyId(questionId);
+    try {
+      await answerQuestion(listing._id, questionId, {
+        userId: user._id,
+        answer: answerText,
+      });
+
+      // Update state locally
+      setListing((prev) => ({
+        ...prev,
+        questions: (prev.questions || []).map((q) =>
+          q._id === questionId ? { ...q, answer: answerText } : q
+        ),
+      }));
+
+      // Clear the reply input for this question
+      setReplyTextMap((prev) => ({ ...prev, [questionId]: '' }));
+    } catch (err) {
+      console.error('Error submitting answer:', err);
+      alert(err.response?.data?.error || err.message || 'Failed to submit answer.');
+    } finally {
+      setSubmittingReplyId(null);
+    }
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-50">
@@ -401,41 +471,48 @@ export default function ListingDetail() {
                 </span>
               </div>
 
-              {/* Ask Question Form */}
-              <form onSubmit={handleAskQuestion} className="mb-6">
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={newQuestion}
-                    onChange={(e) => setNewQuestion(e.target.value)}
-                    placeholder="Ask seller about warranty, hostel pickup, accessories..."
-                    className="flex-1 px-4 py-2.5 text-sm bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  />
-                  <button
-                    type="submit"
-                    disabled={submittingQuestion || !newQuestion.trim()}
-                    className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-semibold text-xs flex items-center gap-1.5 transition-colors"
-                  >
-                    <Send className="w-3.5 h-3.5" />
-                    <span>Ask</span>
-                  </button>
+              {/* Ask Question Form (For buyers) or Seller notification */}
+              {isSeller ? (
+                <div className="mb-6 p-3.5 rounded-2xl bg-indigo-50/70 border border-indigo-100 text-xs text-indigo-900 flex items-center gap-2.5">
+                  <MessageSquare className="w-4 h-4 text-indigo-600 shrink-0" />
+                  <span>Student inquiries about your product will appear below. You can answer them directly in real-time.</span>
                 </div>
-                {questionStatus.message && (
-                  <p
-                    className={`text-xs mt-2 font-medium ${
-                      questionStatus.type === 'error' ? 'text-red-600' : 'text-emerald-600'
-                    }`}
-                  >
-                    {questionStatus.message}
-                  </p>
-                )}
-              </form>
+              ) : (
+                <form onSubmit={handleAskQuestion} className="mb-6">
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={newQuestion}
+                      onChange={(e) => setNewQuestion(e.target.value)}
+                      placeholder="Ask seller about warranty, hostel pickup, accessories..."
+                      className="flex-1 px-4 py-2.5 text-sm bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                    <button
+                      type="submit"
+                      disabled={submittingQuestion || !newQuestion.trim()}
+                      className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-semibold text-xs flex items-center gap-1.5 transition-colors"
+                    >
+                      <Send className="w-3.5 h-3.5" />
+                      <span>Ask</span>
+                    </button>
+                  </div>
+                  {questionStatus.message && (
+                    <p
+                      className={`text-xs mt-2 font-medium ${
+                        questionStatus.type === 'error' ? 'text-red-600' : 'text-emerald-600'
+                      }`}
+                    >
+                      {questionStatus.message}
+                    </p>
+                  )}
+                </form>
+              )}
 
               {/* Q&A List */}
               <div className="space-y-4">
                 {(listing.questions || []).length === 0 ? (
                   <p className="text-xs text-gray-400 py-3 text-center">
-                    No questions yet. Be the first to ask!
+                    No questions yet.
                   </p>
                 ) : (
                   listing.questions.map((q, idx) => (
@@ -447,7 +524,49 @@ export default function ListingDetail() {
                       {q.answer ? (
                         <div className="flex items-start gap-2 mt-2 pt-2 border-t border-gray-200/60 pl-2">
                           <span className="text-xs font-bold text-emerald-600 shrink-0">A:</span>
-                          <p className="text-xs text-gray-600">{q.answer}</p>
+                          <div className="flex-1">
+                            <p className="text-xs text-gray-700">{q.answer}</p>
+                            <span className="text-[10px] text-emerald-600 font-bold mt-1 inline-flex items-center gap-1">
+                              ✓ Verified Seller Response
+                            </span>
+                          </div>
+                        </div>
+                      ) : isSeller ? (
+                        /* Seller Reply Form */
+                        <div className="mt-3 pt-3 border-t border-gray-200/70 pl-2 bg-indigo-50/40 p-3 rounded-xl border border-indigo-100">
+                          <label className="block text-[11px] font-bold text-indigo-800 uppercase tracking-wide mb-1.5 flex items-center gap-1.5">
+                            <CornerDownRight className="w-3.5 h-3.5 text-indigo-600" />
+                            <span>Reply to this buyer as Seller:</span>
+                          </label>
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              value={replyTextMap[q._id] || ''}
+                              onChange={(e) =>
+                                setReplyTextMap((prev) => ({
+                                  ...prev,
+                                  [q._id]: e.target.value,
+                                }))
+                              }
+                              placeholder="e.g. Yes, available for pickup today near Hostel 4..."
+                              className="flex-1 px-3 py-2 text-xs bg-white border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 font-medium"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => handleAnswerQuestion(q._id)}
+                              disabled={
+                                submittingReplyId === q._id ||
+                                !replyTextMap[q._id]?.trim()
+                              }
+                              className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold text-xs flex items-center gap-1 transition-colors shrink-0 shadow-sm shadow-indigo-200"
+                            >
+                              <span>
+                                {submittingReplyId === q._id
+                                  ? 'Posting...'
+                                  : 'Post Answer'}
+                              </span>
+                            </button>
+                          </div>
                         </div>
                       ) : (
                         <p className="text-[11px] text-gray-400 mt-1 italic pl-5">
