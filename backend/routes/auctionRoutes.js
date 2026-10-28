@@ -7,6 +7,8 @@ const User = require('../models/User');
 const Listing = require('../models/Listing');
 const Bid = require('../models/Bid');
 const Question = require('../models/Question');
+const Alert = require('../models/Alert');
+const Notification = require('../models/Notification');
 
 // Helper to safely resolve or create a valid Mongoose User ObjectId
 async function resolveUser(userId, fallbackRole = 'buyer', fallbackName = 'Campus Student') {
@@ -140,6 +142,71 @@ router.post('/listings', async (req, res) => {
     const savedListing = await newListing.save();
     const populated = await Listing.findById(savedListing._id).populate('sellerId', 'name email role');
 
+    // Check matching user alerts in the Alert collection & generate notifications
+    try {
+      const activeAlerts = await Alert.find({
+        active: { $ne: false },
+        userId: { $ne: resolvedSellerId },
+      });
+
+      for (const alert of activeAlerts) {
+        // 1. Category check
+        const matchesCategory =
+          !alert.category ||
+          alert.category === 'all' ||
+          alert.category.toLowerCase() === category.toLowerCase();
+
+        // 2. Maximum price threshold check
+        const matchesPrice =
+          alert.maxPrice === undefined ||
+          alert.maxPrice === null ||
+          parsedStartingPrice <= alert.maxPrice;
+
+        // 3. Keyword search across title and description
+        let matchesKeyword = true;
+        if (alert.keyword && alert.keyword.trim()) {
+          const kw = alert.keyword.trim().toLowerCase();
+          const inTitle = title.toLowerCase().includes(kw);
+          const inDesc = description.toLowerCase().includes(kw);
+          matchesKeyword = inTitle || inDesc;
+        }
+
+        if (matchesCategory && matchesPrice && matchesKeyword) {
+          // Generate an unread notification record
+          const notification = await Notification.create({
+            userId: alert.userId,
+            alertId: alert._id,
+            listingId: savedListing._id,
+            keyword: alert.keyword,
+            title: `Item Matched: ${title}`,
+            message: `A new "${category}" item matching your alert "${alert.keyword}" (Starting ₹${parsedStartingPrice}) was just listed!`,
+            read: false,
+          });
+
+          // Also record match in alert document
+          alert.notifications.push({
+            listingId: savedListing._id,
+            matchedPrice: parsedStartingPrice,
+            read: false,
+            createdAt: new Date(),
+          });
+          await alert.save();
+
+          // Real-time broadcast if socket is connected
+          const io = req.app.get('io');
+          if (io) {
+            io.emit('newAlertNotification', {
+              userId: alert.userId.toString(),
+              notification,
+              listing: populated,
+            });
+          }
+        }
+      }
+    } catch (alertErr) {
+      console.error('Error checking alerts for new listing:', alertErr);
+    }
+
     res.status(201).json(populated);
   } catch (err) {
     console.error('Error creating listing:', err);
@@ -184,6 +251,184 @@ router.get('/listings/:id', async (req, res) => {
     res.status(500).json({ error: 'Failed to retrieve listing details', details: err.message });
   }
 });
+
+/**
+ * PUT /api/listings/:id
+ * Update listing details (title, description, starting price, closing time, etc.)
+ * Strictly verifies that the requesting user is the owner (sellerId).
+ */
+router.put('/listings/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      userId,
+      title,
+      category,
+      description,
+      condition,
+      startingPrice,
+      minIncrement,
+      closingTime,
+      photos,
+    } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'Invalid listing ID format.' });
+    }
+
+    const listing = await Listing.findById(id);
+    if (!listing) {
+      return res.status(404).json({ error: 'Listing not found.' });
+    }
+
+    // Verify ownership: requesting user must match sellerId
+    const sellerIdStr = (listing.sellerId?._id || listing.sellerId).toString();
+    const effectiveUserId = (userId || req.query.userId || req.headers['x-user-id'] || '').toString();
+
+    if (!effectiveUserId || sellerIdStr !== effectiveUserId) {
+      return res.status(403).json({ error: 'Only the seller who created this listing can edit it.' });
+    }
+
+    // Prevent modifying closed or cancelled listings
+    if (listing.status === 'cancelled') {
+      return res.status(400).json({ error: 'Cannot edit a listing that has already been cancelled.' });
+    }
+    if (listing.status === 'sold') {
+      return res.status(400).json({ error: 'Cannot edit a sold listing.' });
+    }
+
+    // Check if any bids have been placed
+    const bidsCount = await Bid.countDocuments({ listingId: listing._id });
+
+    // Validate startingPrice update
+    if (startingPrice !== undefined) {
+      const parsedStartingPrice = Number(startingPrice);
+      if (isNaN(parsedStartingPrice) || parsedStartingPrice < 0) {
+        return res.status(400).json({ error: 'Starting price must be a valid non-negative number.' });
+      }
+
+      if (bidsCount > 0 && parsedStartingPrice !== listing.startingPrice) {
+        return res.status(400).json({
+          error: 'Starting price cannot be changed because bids have already been placed on this auction.',
+        });
+      }
+
+      if (bidsCount === 0) {
+        listing.startingPrice = parsedStartingPrice;
+        listing.currentBid = parsedStartingPrice;
+      }
+    }
+
+    if (title && title.trim()) {
+      listing.title = title.trim();
+    }
+    if (category) {
+      listing.category = category;
+    }
+    if (description && description.trim()) {
+      listing.description = description.trim();
+    }
+    if (condition) {
+      listing.condition = condition;
+    }
+    if (minIncrement !== undefined) {
+      const parsedInc = Number(minIncrement);
+      if (!isNaN(parsedInc) && parsedInc > 0) {
+        listing.minIncrement = parsedInc;
+      }
+    }
+    if (closingTime) {
+      const parsedTime = new Date(closingTime);
+      if (!isNaN(parsedTime.getTime())) {
+        listing.closingTime = parsedTime;
+      }
+    }
+    if (Array.isArray(photos) && photos.length > 0) {
+      listing.photos = photos;
+    }
+
+    const savedListing = await listing.save();
+    const populated = await Listing.findById(savedListing._id).populate('sellerId', 'name email role');
+
+    // Real-Time notification
+    const io = req.app.get('io');
+    if (io) {
+      io.to(id.toString()).emit('listingUpdated', populated);
+    }
+
+    res.json({
+      message: 'Listing updated successfully!',
+      listing: populated,
+    });
+  } catch (err) {
+    console.error('Error updating listing:', err);
+    res.status(500).json({ error: 'Failed to update listing', details: err.message });
+  }
+});
+
+/**
+ * DELETE /api/listings/:id
+ * Cancel or delete an active listing.
+ * Strictly verifies that the requesting user is the owner (sellerId).
+ */
+router.delete('/listings/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const effectiveUserId = (
+      req.body?.userId ||
+      req.query?.userId ||
+      req.headers['x-user-id'] ||
+      ''
+    ).toString();
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'Invalid listing ID format.' });
+    }
+
+    const listing = await Listing.findById(id);
+    if (!listing) {
+      return res.status(404).json({ error: 'Listing not found.' });
+    }
+
+    // Verify ownership
+    const sellerIdStr = (listing.sellerId?._id || listing.sellerId).toString();
+    if (!effectiveUserId || sellerIdStr !== effectiveUserId) {
+      return res.status(403).json({ error: 'Only the seller who created this listing can cancel or delete it.' });
+    }
+
+    const isHardDelete = req.query.hardDelete === 'true';
+
+    if (isHardDelete) {
+      // Remove bids and questions associated with the listing
+      await Bid.deleteMany({ listingId: listing._id });
+      await Question.deleteMany({ listingId: listing._id });
+      await Listing.findByIdAndDelete(id);
+    } else {
+      // Soft cancel listing: mark status as 'cancelled'
+      listing.status = 'cancelled';
+      await listing.save();
+    }
+
+    // Real-time broadcast
+    const io = req.app.get('io');
+    if (io) {
+      io.to(id.toString()).emit('listingCancelled', {
+        listingId: id.toString(),
+        isHardDelete,
+      });
+    }
+
+    res.json({
+      message: isHardDelete ? 'Listing deleted permanently.' : 'Listing cancelled successfully.',
+      listingId: id,
+      status: isHardDelete ? 'deleted' : 'cancelled',
+    });
+  } catch (err) {
+    console.error('Error cancelling/deleting listing:', err);
+    res.status(500).json({ error: 'Failed to cancel listing', details: err.message });
+  }
+});
+
 
 /**
  * 4. POST /api/listings/:id/bid & /api/listings/:id/bids
@@ -594,6 +839,135 @@ router.get('/users/:userId/bids', async (req, res) => {
   } catch (err) {
     console.error('Error fetching user bids:', err);
     res.status(500).json({ error: 'Failed to fetch user bids', details: err.message });
+  }
+});
+
+/**
+ * -------------------------------------------------------------
+ * ALERTS & WATCHLIST ENDPOINTS
+ * -------------------------------------------------------------
+ */
+
+/**
+ * POST /api/alerts
+ * Create a new search alert for items and price thresholds
+ */
+router.post('/alerts', async (req, res) => {
+  try {
+    const { userId, keyword, maxPrice, category } = req.body;
+
+    if (!keyword || !keyword.trim()) {
+      return res.status(400).json({ error: 'Keyword is required for setting an alert.' });
+    }
+
+    const resolvedUserId = await resolveUser(userId, 'buyer', 'Campus Student');
+    const parsedPrice =
+      maxPrice !== undefined && maxPrice !== '' ? Number(maxPrice) : 999999;
+
+    const newAlert = new Alert({
+      userId: resolvedUserId,
+      keyword: keyword.trim(),
+      maxPrice: isNaN(parsedPrice) || parsedPrice <= 0 ? 999999 : parsedPrice,
+      category: category && category !== 'all' ? category : 'all',
+      active: true,
+      notifications: [],
+    });
+
+    const saved = await newAlert.save();
+    res.status(201).json(saved);
+  } catch (err) {
+    console.error('Error creating alert:', err);
+    res.status(500).json({ error: 'Failed to create alert', details: err.message });
+  }
+});
+
+/**
+ * GET /api/alerts/:userId
+ * Fetch user's active search alerts and any triggered notifications
+ */
+router.get('/alerts/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({ error: 'Invalid user ID format' });
+    }
+
+    const alerts = await Alert.find({ userId })
+      .populate('notifications.listingId', 'title category currentBid startingPrice photos status closingTime')
+      .sort({ createdAt: -1 });
+
+    const notifications = await Notification.find({ userId })
+      .populate('listingId', 'title category currentBid startingPrice photos status closingTime')
+      .sort({ createdAt: -1 });
+
+    res.json({
+      alerts,
+      notifications,
+    });
+  } catch (err) {
+    console.error('Error fetching user alerts:', err);
+    res.status(500).json({ error: 'Failed to retrieve alerts', details: err.message });
+  }
+});
+
+/**
+ * DELETE /api/alerts/:id
+ * Delete or unsubscribe from an alert
+ */
+router.delete('/alerts/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'Invalid alert ID format' });
+    }
+
+    await Alert.findByIdAndDelete(id);
+    await Notification.deleteMany({ alertId: id });
+
+    res.json({ message: 'Alert removed successfully', alertId: id });
+  } catch (err) {
+    console.error('Error deleting alert:', err);
+    res.status(500).json({ error: 'Failed to delete alert', details: err.message });
+  }
+});
+
+/**
+ * PUT /api/notifications/:id/read
+ * Mark a single notification as read
+ */
+router.put('/notifications/:id/read', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'Invalid notification ID format' });
+    }
+
+    const updated = await Notification.findByIdAndUpdate(
+      id,
+      { read: true },
+      { new: true }
+    );
+    res.json(updated);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to mark notification read', details: err.message });
+  }
+});
+
+/**
+ * PUT /api/notifications/read-all/:userId
+ * Mark all notifications for a user as read
+ */
+router.put('/notifications/read-all/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({ error: 'Invalid user ID format' });
+    }
+
+    await Notification.updateMany({ userId, read: false }, { read: true });
+    res.json({ message: 'All notifications marked as read' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to mark all read', details: err.message });
   }
 });
 

@@ -13,6 +13,7 @@ import {
   Menu,
   X,
   Sparkles,
+  Bell,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
@@ -98,6 +99,18 @@ export default function Navbar() {
                 >
                   <History className="w-4 h-4" />
                   My Bids/Purchases
+                </Link>
+
+                <Link
+                  to="/alerts"
+                  className={`flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold transition-colors ${
+                    isActive('/alerts')
+                      ? 'bg-indigo-50 text-indigo-700 font-bold'
+                      : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100'
+                  }`}
+                >
+                  <Bell className="w-4 h-4 text-indigo-500" />
+                  Alerts
                 </Link>
               </>
             )}
@@ -235,6 +248,19 @@ export default function Navbar() {
               >
                 <History className="w-4 h-4" />
                 My Bids/Purchases
+              </Link>
+
+              <Link
+                to="/alerts"
+                onClick={() => setMobileMenuOpen(false)}
+                className={`flex items-center gap-2 px-3 py-2 rounded-md text-sm font-semibold ${
+                  isActive('/alerts')
+                    ? 'bg-indigo-50 text-indigo-700'
+                    : 'text-gray-700 hover:bg-gray-100'
+                }`}
+              >
+                <Bell className="w-4 h-4 text-indigo-500" />
+                Alerts & Watchlist
               </Link>
             </>
           )}

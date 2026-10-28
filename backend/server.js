@@ -18,6 +18,7 @@ require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
 require('dotenv').config();
 
 const auctionRoutes = require('./routes/auctionRoutes');
+const aiAgentRoutes = require('./routes/aiAgentRoutes');
 
 const app = express();
 const server = http.createServer(app);
@@ -74,6 +75,7 @@ app.get('/', (req, res) => {
 
 // Register auction API routes under /api
 app.use('/api', auctionRoutes);
+app.use('/api', aiAgentRoutes);
 
 const PORT = process.env.PORT || 5001;
 

@@ -9,6 +9,7 @@ import Login from './pages/Login';
 import Register from './pages/Register';
 import MyListings from './pages/MyListings';
 import MyPurchases from './pages/MyPurchases';
+import Alerts from './pages/Alerts';
 import ProtectedRoute from './components/ProtectedRoute';
 import { AuthProvider } from './context/AuthContext';
 
@@ -45,6 +46,14 @@ export default function App() {
                 element={
                   <ProtectedRoute>
                     <MyPurchases />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/alerts"
+                element={
+                  <ProtectedRoute>
+                    <Alerts />
                   </ProtectedRoute>
                 }
               />

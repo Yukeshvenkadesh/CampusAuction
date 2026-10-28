@@ -18,6 +18,8 @@ import {
   LogIn,
   MessageSquare,
   CornerDownRight,
+  Edit3,
+  AlertTriangle,
 } from 'lucide-react';
 import { getListingById, placeBid, askQuestion, answerQuestion } from '../services/api';
 import { socket } from '../services/socket';
@@ -143,15 +145,38 @@ export default function ListingDetail() {
       }
     };
 
+    const handleListingUpdated = (data) => {
+      if (data && data._id === id) {
+        setListing((prev) => ({
+          ...prev,
+          ...data,
+        }));
+        setLiveNotification('⚡ Listing details were updated by the seller.');
+        setTimeout(() => setLiveNotification(''), 4500);
+      }
+    };
+
+    const handleListingCancelled = (data) => {
+      if (data && data.listingId === id) {
+        setListing((prev) => (prev ? { ...prev, status: 'cancelled' } : prev));
+        setLiveNotification('⚠️ This auction has been cancelled by the seller.');
+        setTimeout(() => setLiveNotification(''), 6000);
+      }
+    };
+
     socket.on('bidUpdate', handleBidUpdate);
     socket.on('questionPosted', handleQuestionPosted);
     socket.on('questionAnswered', handleQuestionAnswered);
+    socket.on('listingUpdated', handleListingUpdated);
+    socket.on('listingCancelled', handleListingCancelled);
 
     return () => {
       socket.emit('leaveListing', id);
       socket.off('bidUpdate', handleBidUpdate);
       socket.off('questionPosted', handleQuestionPosted);
       socket.off('questionAnswered', handleQuestionAnswered);
+      socket.off('listingUpdated', handleListingUpdated);
+      socket.off('listingCancelled', handleListingCancelled);
       socket.off('connect', onConnect);
       socket.off('disconnect', onDisconnect);
     };
@@ -200,6 +225,14 @@ export default function ListingDetail() {
 
     if (!isAuthenticated) {
       navigate('/login', { state: { from: location } });
+      return;
+    }
+
+    if (listing?.status === 'cancelled') {
+      setBidStatus({
+        type: 'error',
+        message: 'This auction has been cancelled by the seller.',
+      });
       return;
     }
 
@@ -262,6 +295,14 @@ export default function ListingDetail() {
   const handleAskQuestion = async (e) => {
     e.preventDefault();
     if (!newQuestion.trim()) return;
+
+    if (listing?.status === 'cancelled') {
+      setQuestionStatus({
+        type: 'error',
+        message: 'Cannot ask questions on a cancelled listing.',
+      });
+      return;
+    }
 
     if (!isAuthenticated) {
       navigate('/login', { state: { from: location } });
@@ -605,8 +646,20 @@ export default function ListingDetail() {
                   <span className="text-[10px] uppercase tracking-wider text-indigo-300 font-bold block">
                     Status
                   </span>
-                  <span className="text-xs font-semibold text-emerald-400 capitalize">
-                    {isExpired ? 'Closed' : listing.status || 'Active'}
+                  <span
+                    className={`text-xs font-semibold capitalize ${
+                      listing?.status === 'cancelled'
+                        ? 'text-rose-400'
+                        : isExpired || listing?.status === 'sold'
+                        ? 'text-amber-400'
+                        : 'text-emerald-400'
+                    }`}
+                  >
+                    {listing?.status === 'cancelled'
+                      ? 'Cancelled'
+                      : isExpired
+                      ? 'Closed'
+                      : listing.status || 'Active'}
                   </span>
                 </div>
               </div>
@@ -637,14 +690,28 @@ export default function ListingDetail() {
                 </div>
               </div>
 
-              {/* Seller Notification Box or Buyer Bid Form */}
-              {isSeller ? (
+              {/* Cancelled Box, Seller Management Box, or Buyer Bid Form */}
+              {listing?.status === 'cancelled' ? (
+                <div className="mt-6 p-5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-900 shadow-sm animate-fadeIn">
+                  <div className="flex items-start gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-rose-100 border border-rose-200 flex items-center justify-center text-rose-700 shrink-0">
+                      <AlertTriangle className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-bold text-rose-950">Auction Cancelled</h4>
+                      <p className="text-xs text-rose-800 mt-1 leading-relaxed">
+                        This listing was cancelled by the seller. No further bids or questions can be accepted.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              ) : isSeller ? (
                 <div className="mt-6 p-5 rounded-2xl bg-amber-50/90 border border-amber-200 text-amber-900 shadow-sm animate-fadeIn">
                   <div className="flex items-start gap-3">
                     <div className="w-10 h-10 rounded-xl bg-amber-100 border border-amber-200 flex items-center justify-center text-amber-700 shrink-0">
                       <ShieldCheck className="w-5 h-5" />
                     </div>
-                    <div>
+                    <div className="flex-1">
                       <h4 className="text-sm font-bold text-amber-950">Your Product Listing</h4>
                       <p className="text-xs text-amber-900 mt-1 leading-relaxed">
                         This is your listing. You cannot bid on your own item.
@@ -652,6 +719,15 @@ export default function ListingDetail() {
                       <p className="text-[11px] text-amber-700 mt-2 font-medium">
                         Student bids from across campus will appear in the Live Bid History below in real-time.
                       </p>
+                      <div className="mt-4 pt-3 border-t border-amber-200/80 flex items-center gap-2">
+                        <Link
+                          to="/my-listings"
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-100 hover:bg-amber-200 text-amber-900 text-xs font-bold rounded-lg transition-colors"
+                        >
+                          <Edit3 className="w-3.5 h-3.5" />
+                          <span>Manage / Edit in Dashboard</span>
+                        </Link>
+                      </div>
                     </div>
                   </div>
                 </div>

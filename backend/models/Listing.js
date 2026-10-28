@@ -9,7 +9,7 @@ const listingSchema = new mongoose.Schema({
   currentBid: { type: Number, required: true },
   minIncrement: { type: Number, required: true },
   closingTime: { type: Date, required: true },
-  status: { type: String, enum: ['active', 'sold', 'unsold'], default: 'active' },
+  status: { type: String, enum: ['active', 'sold', 'unsold', 'cancelled'], default: 'active' },
   sellerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }
 }, { timestamps: true });
 module.exports = mongoose.model('Listing', listingSchema);

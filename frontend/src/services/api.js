@@ -34,6 +34,19 @@ export const createListing = async (listingData) => {
   return response.data;
 };
 
+export const updateListing = async (listingId, listingData) => {
+  const response = await api.put(`/listings/${listingId}`, listingData);
+  return response.data;
+};
+
+export const deleteListing = async (listingId, userId, hardDelete = false) => {
+  const response = await api.delete(`/listings/${listingId}`, {
+    data: { userId },
+    params: { userId, hardDelete },
+  });
+  return response.data;
+};
+
 export const placeBid = async (listingId, { bidderId, bidderName, amount }) => {
   const response = await api.post(`/listings/${listingId}/bids`, {
     bidderId,
@@ -73,6 +86,46 @@ export const getUserListings = async (userId) => {
 
 export const getUserBids = async (userId) => {
   const response = await api.get(`/users/${userId}/bids`);
+  return response.data;
+};
+
+export const createAlert = async ({ userId, keyword, maxPrice, category }) => {
+  const response = await api.post('/alerts', { userId, keyword, maxPrice, category });
+  return response.data;
+};
+
+export const getUserAlerts = async (userId) => {
+  const response = await api.get(`/alerts/${userId}`);
+  return response.data;
+};
+
+export const deleteAlert = async (alertId) => {
+  const response = await api.delete(`/alerts/${alertId}`);
+  return response.data;
+};
+
+export const markNotificationRead = async (notificationId) => {
+  const response = await api.put(`/notifications/${notificationId}/read`);
+  return response.data;
+};
+
+export const markAllNotificationsRead = async (userId) => {
+  const response = await api.put(`/notifications/read-all/${userId}`);
+  return response.data;
+};
+
+export const aiFindListings = async ({ prompt, budgetLimit, userId }) => {
+  const response = await api.post('/ai/find', { prompt, budgetLimit, userId });
+  return response.data;
+};
+
+export const aiAutoBid = async ({ listingId, userId, maxBudget, authorized = true }) => {
+  const response = await api.post('/ai/auto-bid', {
+    listingId,
+    userId,
+    maxBudget,
+    authorized,
+  });
   return response.data;
 };
 
